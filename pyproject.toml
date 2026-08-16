@@ -44,6 +44,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 testpaths = ["tests/unit_tests"]
 asyncio_mode = "auto"
+pythonpath = ["."]
 addopts = "--cov=langchain_ascend --cov-report=term-missing --cov-fail-under=90"
 markers = ["integration: requires real Ascend NPU hardware or an engine endpoint (skipped in CI)"]
 

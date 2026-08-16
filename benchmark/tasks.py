@@ -4,10 +4,16 @@ Eight multi-turn advisor-customer dialogues across four categories. Half of
 the tasks include one client-side history rewrite (the user revises an
 earlier message and the stale AI reply is dropped), which is exactly the
 prefix-divergence pattern the affinity model must detect and release.
+
+A ``longrun`` task drives batch holdings/risk verification for 25 synthetic
+customers (sustained tool-calling, ~100-150 LLM calls) and a fingerprint
+hash pins the exact inputs across rounds and runs.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
@@ -98,42 +104,56 @@ _FUND_PROFILES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# 25 deterministic synthetic customers for the long-horizon sweep task:
+# risk-profile/allocation mismatches are intentional so the agent has real
+# findings to report. Deterministic, in-memory, no network.
 
-@tool
-def get_customer_holdings(customer_id: str) -> dict:
-    """查询客户当前持仓明细（资产、类型、市值、风险等级）。
 
-    Args:
-        customer_id: 客户编号，例如 C1001。
-    """
+def _synthetic_customers() -> Dict[str, Dict[str, Any]]:
+    profiles = [
+        ("进取型", 70, 20, 10),
+        ("平衡型", 50, 40, 10),
+        ("稳健型", 70, 20, 10),  # mismatch: conservative profile, equity-heavy
+        ("保守型", 10, 60, 30),
+    ]
+    customers: Dict[str, Dict[str, Any]] = {}
+    for index in range(25):
+        label, equity, bond, cash = profiles[index % 4]
+        total = 300000 + index * 50000
+        customers[f"C{2001 + index}"] = {
+            "customer_id": f"C{2001 + index}",
+            "customer_name": f"合成客户{2001 + index}",
+            "risk_profile": label,
+            "total_assets": total,
+            "positions": [
+                {"asset": "宽基指数ETF", "type": "权益", "value": total * equity // 100},
+                {"asset": "中债指数基金", "type": "债券", "value": total * bond // 100},
+                {"asset": "货币基金", "type": "现金", "value": total * cash // 100},
+            ],
+        }
+    return customers
+
+
+_HOLDINGS.update(_synthetic_customers())
+
+
+# -- shared pure logic (used by both langchain and openJiuwen tools) ------------
+
+
+def holdings_of(customer_id: str) -> Dict[str, Any]:
+    """Look up one customer's holdings."""
     holdings = _HOLDINGS.get(customer_id)
-    if holdings is None:
-        return {"error": f"未找到客户 {customer_id}"}
-    return holdings
+    return holdings if holdings is not None else {"error": f"未找到客户 {customer_id}"}
 
 
-@tool
-def get_fund_profile(fund_code: str) -> dict:
-    """查询基金档案（类型、管理费、托管费、近一年收益与最大回撤）。
-
-    Args:
-        fund_code: 基金代码，可选 F001/F002/F003/F004。
-    """
+def fund_profile_of(fund_code: str) -> Dict[str, Any]:
+    """Look up one fund's profile."""
     profile = _FUND_PROFILES.get(fund_code)
-    if profile is None:
-        return {"error": f"未找到基金 {fund_code}"}
-    return profile
+    return profile if profile is not None else {"error": f"未找到基金 {fund_code}"}
 
 
-@tool
-def compute_portfolio_risk(equity_pct: float, bond_pct: float, cash_pct: float) -> dict:
-    """按股/债/现金占比计算组合风险评分（0-100，越高越激进）。
-
-    Args:
-        equity_pct: 权益占比（百分比数字）。
-        bond_pct: 债券占比（百分比数字）。
-        cash_pct: 现金占比（百分比数字）。
-    """
+def portfolio_risk(equity_pct: float, bond_pct: float, cash_pct: float) -> Dict[str, Any]:
+    """Score a portfolio composition (0-100, higher = more aggressive)."""
     total = equity_pct + bond_pct + cash_pct
     if abs(total - 100.0) > 0.5:
         return {"error": "股/债/现金占比之和必须等于 100"}
@@ -145,6 +165,38 @@ def compute_portfolio_risk(equity_pct: float, bond_pct: float, cash_pct: float) 
     else:
         rating = "稳健"
     return {"risk_score": round(score, 1), "rating": rating}
+
+
+@tool
+def get_customer_holdings(customer_id: str) -> dict:
+    """查询客户当前持仓明细（资产、类型、市值、风险等级）。
+
+    Args:
+        customer_id: 客户编号，例如 C1001。
+    """
+    return holdings_of(customer_id)
+
+
+@tool
+def get_fund_profile(fund_code: str) -> dict:
+    """查询基金档案（类型、管理费、托管费、近一年收益与最大回撤）。
+
+    Args:
+        fund_code: 基金代码，可选 F001/F002/F003/F004。
+    """
+    return fund_profile_of(fund_code)
+
+
+@tool
+def compute_portfolio_risk(equity_pct: float, bond_pct: float, cash_pct: float) -> dict:
+    """按股/债/现金占比计算组合风险评分（0-100，越高越激进）。
+
+    Args:
+        equity_pct: 权益占比（百分比数字）。
+        bond_pct: 债券占比（百分比数字）。
+        cash_pct: 现金占比（百分比数字）。
+    """
+    return portfolio_risk(equity_pct, bond_pct, cash_pct)
 
 
 @dataclass(frozen=True)
@@ -169,6 +221,46 @@ class FinanceTask:
 def build_tools() -> List[Any]:
     """The deterministic in-memory tool set shared by both agents."""
     return [get_customer_holdings, get_fund_profile, compute_portfolio_risk]
+
+
+_LONGRUN_INSTRUCTION = (
+    "请依次对以下25位客户完成年度持仓核查：C2001 到 C2025（连续编号）。"
+    "每位客户必须：1) 调用持仓工具查询当前持仓；"
+    "2) 根据持仓计算股/债/现金占比并调用风险工具得到风险评分；"
+    "3) 判断该评分与客户风险定位（进取/平衡/稳健/保守）是否匹配。"
+    "全部处理完成后，输出一份偏离客户清单（编号、定位、实际评分、偏离说明）。"
+    "不要跳过任何客户，不要凭记忆编造数据。"
+)
+
+
+def load_longrun_tasks() -> List[FinanceTask]:
+    """The long-horizon sweep task (sustained tool calling, ~100-150 calls)."""
+    return [
+        FinanceTask(
+            task_id="longrun-portfolio-sweep",
+            category="longrun",
+            customer_id="C2001-C2025",
+            turns=[_LONGRUN_INSTRUCTION],
+            expected_keywords=["偏离", "清单"],
+            edit_replaces_turn=-1,
+            edit_replacement="",
+        )
+    ]
+
+
+def task_fingerprint(include_longrun: bool = False) -> str:
+    """Stable hash of the exact dialogue inputs (round baseline proof)."""
+    tasks = load_tasks() + (load_longrun_tasks() if include_longrun else [])
+    payload = [
+        {
+            "id": task.task_id,
+            "turns": task.turns,
+            "edit_replacement": task.edit_replacement,
+        }
+        for task in tasks
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def load_tasks() -> List[FinanceTask]:

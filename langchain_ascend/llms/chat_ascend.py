@@ -25,8 +25,10 @@ Session resolution order per call: per-call / ``bind(session_id=...)`` kwargs
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
+import urllib.error
 import urllib.request
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
@@ -139,6 +141,12 @@ class AscendAffinityChatModel(BaseChatModel):
         default="/release_kv_cache",
         description="Partial KV-Cache release path on the engine "
         "(agent-core compatible). Empty string disables release requests.",
+    )
+    streaming: bool = Field(
+        default=False,
+        description="When True, invoke()/ainvoke() stream via SSE internally "
+        "and aggregate the chunks, emitting on_llm_new_token callbacks "
+        "(mirrors ChatOpenAI's streaming flag; enables real TTFT capture).",
     )
 
     _prefix_tracker: PrefixCacheTracker = PrivateAttr(default_factory=PrefixCacheTracker)
@@ -287,6 +295,22 @@ class AscendAffinityChatModel(BaseChatModel):
             )
         return tool_calls
 
+    @staticmethod
+    def _usage_metadata(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Map an OpenAI-compatible ``usage`` block to LangChain usage metadata."""
+        if not usage:
+            return None
+        details = usage.get("prompt_tokens_details") or {}
+        cached = details.get("cached_tokens")
+        metadata: Dict[str, Any] = {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
+        if cached:
+            metadata["input_token_details"] = {"cache_read": cached}
+        return metadata
+
     def _parse_chat_result(self, response: Dict[str, Any]) -> ChatResult:
         choice = (response.get("choices") or [{}])[0]
         message = dict(choice.get("message") or {})
@@ -294,6 +318,9 @@ class AscendAffinityChatModel(BaseChatModel):
             content=message.get("content") or "",
             tool_calls=self._parse_tool_calls(message.get("tool_calls") or []),
         )
+        usage_metadata = self._usage_metadata(response.get("usage"))
+        if usage_metadata is not None:
+            ai_message.usage_metadata = usage_metadata
         return ChatResult(
             generations=[ChatGeneration(message=ai_message)],
             llm_output={"model": response.get("model", "")},
@@ -327,6 +354,23 @@ class AscendAffinityChatModel(BaseChatModel):
         response = self._post(self.base_url, "/chat/completions", payload)
         return self._parse_chat_result(response)
 
+    def _generate_from_stream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]],
+        run_manager: Optional[CallbackManagerForLLMRun],
+        kwargs: Dict[str, Any],
+    ) -> ChatResult:
+        """Aggregate the SSE stream so invoke() still returns one message."""
+        final: Optional[AIMessageChunk] = None
+        for chunk in self._stream(messages, stop, run_manager, **kwargs):
+            final = chunk.message if final is None else final + chunk.message
+        message = final if final is not None else AIMessageChunk(content="")
+        return ChatResult(
+            generations=[ChatGeneration(message=message)],
+            llm_output={"model": self.model},
+        )
+
     def _generate(
         self,
         messages: List[BaseMessage],
@@ -334,6 +378,8 @@ class AscendAffinityChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        if self.streaming:
+            return self._generate_from_stream(messages, stop, run_manager, kwargs)
         return self._request(messages, stop, run_manager, kwargs)
 
     async def _agenerate(
@@ -344,7 +390,7 @@ class AscendAffinityChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         return await asyncio.to_thread(
-            self._request, messages, stop, run_manager, kwargs
+            functools.partial(self._generate, messages, stop, run_manager, **kwargs)
         )
 
     # -- streaming ----------------------------------------------------------------
@@ -392,7 +438,14 @@ class AscendAffinityChatModel(BaseChatModel):
         """Stream the completion via SSE with the affinity pipeline applied."""
         payload = self._prepare_request(messages, stop, run_manager, kwargs)
         payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
         for event in self._stream_events(payload):
+            usage_metadata = self._usage_metadata(event.get("usage"))
+            if usage_metadata is not None:
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(content="", usage_metadata=usage_metadata)
+                )
+                continue
             choice = (event.get("choices") or [{}])[0]
             delta = dict(choice.get("delta") or {})
             content = delta.get("content") or ""

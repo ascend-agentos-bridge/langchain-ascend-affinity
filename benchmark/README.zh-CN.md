@@ -1,20 +1,24 @@
-# 基准测试：deepagents × 昇腾算力亲和（真实引擎）
+# 基准测试：4 Agent 化验单 × 昇腾算力亲和（真实引擎）
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-面向**真实**昇腾推理引擎（MindIE / vLLM-Ascend）的单变量基准测试。
+面向**真实**昇腾推理引擎（MindIE / vLLM-Ascend）的四智能体基准测试。
 **不提供模拟引擎**：引擎不可达时脚本直接退出并给出指引。
 
-- **baseline**：`deepagents` 投顾智能体 + 原生 `ChatOpenAI`
-- **affinity**：同一智能体（相同工具、相同指令、相同任务集）+
-  `AscendAffinityChatModel` —— salt 绑定 + 前缀差异检测 + 部分 KV 释放
+| Agent | 框架 | 模型 / Provider | KV 释放 |
+|---|---|---|---|
+| `lc-baseline` | deepagents | 原生 `ChatOpenAI` | 关 |
+| `lc-affinity` | deepagents | `AscendAffinityChatModel` | 开（salt 绑定 + 前缀差异 + 部分释放） |
+| `oj-baseline` | openJiuwen ReActAgent | provider `OpenAI` | 关 |
+| `oj-affinity` | openJiuwen ReActAgent | provider `InferenceAffinity` | 开 |
 
-唯一变量是聊天模型对象。
+每个亲和 Agent **只与同框架的 baseline 对比**（每对单一变量）。
+`--agents all|lc|oj|<逗号列表>` 可选择子集。
 
 ## 快速开始
 
 ```bash
-# 一键：安装基准依赖 + 引擎探测 + 跑双智能体 + 出报告
+# 一键：安装基准依赖 + 引擎探测 + 跑全部四个智能体 + 出报告
 python benchmark/run_benchmark.py --setup \
   --engine-url http://<引擎地址>:<端口>/v1 \
   --model <模型名> \
@@ -30,26 +34,52 @@ export ASCEND_API_KEY=<API密钥>
 python benchmark/run_benchmark.py
 ```
 
-可选项：`--api-key`（兜底 `ASCEND_API_KEY` 环境变量，本地无鉴权引擎默认
-`EMPTY`）、`--max-parallel`（任务并发数，默认 2）、`--turn-timeout`（单轮
-超时秒数，默认 240）、`--report-dir`（报告目录）。
+参数：
 
-## 度量什么
+- `--rounds N`（默认 3）：每轮完整任务集；agent 顺序每轮轮转；每 agent
+  每轮前 1 次不计分预热；以跨轮中位数为主判定值。每轮输入字节级一致
+  （任务集指纹写入报告）。
+- `--include-longrun`：追加 25 客户组合核查长时任务（约 100-150 次
+  LLM 调用的持续工具循环）。
+- `--metrics-url`：可选 vLLM `/metrics` 端点 —— 采集每 agent 窗口的
+  引擎侧前缀缓存命中率与 KV Cache 占用。
+- `--npu-cmd`：可选采样命令，输出 `key=value`（如在引擎机上经
+  `npu-smi` + `awk` 采集 NPU 利用率 / HBM 占用）。
+- `--api-key`（回退 `ASCEND_API_KEY`，本地无鉴权引擎默认 `EMPTY`）、
+  `--max-parallel`（默认 2）、`--turn-timeout`（默认 240 秒）、
+  `--report-dir`。
 
-| 指标 | 方式 |
-|---|---|
-| TTFT（mean / p50 / p95） | 每次真实 LLM 调用的首 token 时延（`on_llm_start` → 首个 `on_llm_new_token`） |
-| 单轮 E2E | 每轮对话的墙钟时间 |
-| 亲和行为 | `affinity_stats`：salt 绑定请求数、释放尝试/失败次数 |
-| 正确性 | 按任务的预期关键词命中，两智能体对照 |
+## 测量指标
 
-任务集为 8 段金融投顾对话（调仓 / 风险测评 / 产品对比 / 市场问答），
-其中一半包含客户端历史改写（用户修改早前消息）——正是前缀差异调度
-必须检测并释放的模式。
+| 指标 | 采集方式 | 说明 |
+|---|---|---|
+| TTFT mean/p50/p95 | `on_llm_start` → 首个 `on_llm_new_token`（两个 lc agent 均开启流式） | oj 侧显示 ➖（agent-core 无 token 级回调） |
+| TPOT | `(E2E − TTFT) / (输出 tokens − 1)` | 依赖 usage 透传 |
+| E2E（每次 LLM 调用） | 回调墙钟时间 | 四个 agent 均可测 |
+| Prefill / decode tokens | `usage_metadata` 汇总（`prompt_tokens` / `completion_tokens`） | 四个 agent 均可测 |
+| KV 命中率（客户端） | `cached_tokens / prompt_tokens` | 需引擎上报 `prompt_tokens_details.cached_tokens` |
+| Decode tokens/s | decode tokens / decode 时长 | |
+| KV 命中率 / KV 内存（引擎侧） | `--metrics-url` Prometheus 快照差分 | 可选，无则 ➖ |
+| NPU 利用率 / 带宽 | `--npu-cmd` 采样 | 可选，无则 ➖ |
+| 亲和行为 | `affinity_stats`（salt 绑定、释放尝试/失败） | lc-affinity |
+| 正确性 | 按任务的预期关键词命中，跨 agent 对比 | |
 
-## 如何读报告
+任务集：8 段金融投顾对话（调仓 / 风险测评 / 产品对比 / 市场问答），
+其中一半含客户端历史改写（前缀差异调度必须检测并释放的形态），
+另有可选的长时核查任务。
 
-报告输出在 `benchmark/reports/benchmark_report_<时间戳>.md`（另有含全部
-原始调用记录的 `.json`）。章节：环境与引擎能力探测、任务集、结果对比
-表、按任务正确性、自动解读与公平性声明。单次运行样本量小，建议多轮
-运行取中位数。
+## 如何读化验单报告
+
+报告输出到 `benchmark/reports/benchmark_report_<ts>.md`（附 `.json`
+逐调用原始记录）。类似医疗化验报告，每个指标行带**参考区间**和判定：
+✅ PASS / ⚠️ WARN / ❌ FAIL / ➖ N/A。
+
+- **核心四项**：TTFT↓、Prefill tokens/call↓、KV 命中率↑、E2E↓。
+  四项**同步改善** = 算力亲和真实生效（前缀缓存命中减少重算）。
+- decode 侧指标（TPOT、tokens/s、decode tokens/call）应≈持平 ——
+  亲和影响 prefill/缓存，不改变 decode 速度。
+- **假亲和警报**：若仅 NPU 侧指标变化而核心四项持平，报告自动给出
+  "疑似假亲和"判定。
+- openJiuwen 侧以 E2E / Prefill / KV 命中率三项判定（无 token 级
+  回调，TTFT 显示 ➖）。
+- 主判定使用跨轮中位数，报告含分轮明细；建议 `rounds ≥ 3`。

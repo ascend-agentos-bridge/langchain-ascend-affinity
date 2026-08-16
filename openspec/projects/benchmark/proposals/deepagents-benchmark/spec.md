@@ -101,3 +101,64 @@ root READMEs.
 
 **Acceptance Criteria:**
 - [ ] Quality gate exits 0.
+
+### REQ-7: Four-agent matrix (LangChain × openJiuwen)
+
+**Requirement:** The runner MUST support four agents over the same task set:
+`lc-baseline` (deepagents + ChatOpenAI), `lc-affinity` (deepagents +
+AscendAffinityChatModel), `oj-baseline` (openJiuwen ReActAgent, provider
+OpenAI, `enable_kv_cache_release=False`) and `oj-affinity` (openJiuwen
+ReActAgent, provider InferenceAffinity, `enable_kv_cache_release=True`).
+openJiuwen agents reuse equivalent tools and a semantically equivalent
+advisor prompt; per-task sessions map to `conversation_id`. `--agents`
+selects a subset. History rewrites for openJiuwen agents start a corrected
+conversation (suffix `-r<n>`) carrying an explicit correction notice, since
+their history lives inside the session store.
+
+**Acceptance Criteria:**
+- [ ] All four agents run against the same engine with identical task text.
+- [ ] Affinity flags differ only between each framework's baseline/affinity
+      pair (single variable per pair).
+
+### REQ-8: Full metric set + lab-sheet verdicts
+
+**Requirement:** The runner MUST collect per-LLM-call TTFT, TPOT
+(`(e2e-ttft)/(output_tokens-1)`), E2E, decode tokens/s, prefill tokens,
+decode tokens and client-side KV hit rate (`cached_tokens/prompt_tokens`
+from usage passthrough). Optional engine-side metrics via `--metrics-url`
+(vLLM Prometheus snapshot deltas: prefix-cache hit rate, KV cache usage)
+and `--npu-cmd` (engine-host NPU sampler) degrade to ➖ N/A when absent.
+The report MUST render a lab-sheet table: each metric row carries a
+reference range and a verdict column (✅ PASS / ⚠️ WARN / ❌ FAIL / ➖ N/A)
+comparing each affinity agent against its same-framework baseline.
+Core-four signals (TTFT ↓, prefill ↓, KV hit ↑, E2E ↓) improving together
+MUST yield an overall "affinity effective" verdict; NPU-only movement with
+flat core-four MUST raise a "suspected false affinity" alert.
+
+**Acceptance Criteria:**
+- [ ] Verdict rules are deterministic and unit-tested.
+- [ ] Missing data renders ➖ N/A instead of failing the run.
+
+### REQ-9: Round baseline (fixed inputs, rotation, warmup)
+
+**Requirement:** `--rounds N` (default 3) executes the full task set per
+agent per round with byte-identical inputs (task-set fingerprint hashed
+into the report); agent order rotates each round to cancel engine cache
+warm-up bias; each agent performs one untimed warm-up dialogue per round;
+headline numbers are medians across rounds with per-round detail retained.
+Sampling parameters (temperature 0.3, concurrency, timeouts) are pinned
+and recorded in the report.
+
+**Acceptance Criteria:**
+- [ ] Report shows per-round tables plus cross-round medians.
+- [ ] Identical task fingerprint across runs on unchanged task code.
+
+### REQ-10: Long-horizon tool-calling task
+
+**Requirement:** A `longrun` task category MUST provide a single-turn
+instruction that drives batch holdings/risk verification for 25 customers
+(≈100-150 LLM calls) with raised iteration limits; included via
+`--include-longrun` (off by default).
+
+**Acceptance Criteria:**
+- [ ] The task exercises sustained tool-calling loops on all four agents.

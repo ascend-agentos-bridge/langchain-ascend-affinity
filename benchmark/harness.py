@@ -1,37 +1,14 @@
-"""One-click 4-agent affinity benchmark against a REAL Ascend engine.
+"""Benchmark harness: 4-agent execution, metric collection, lab-sheet report.
 
-Usage (from the repository root):
-
-    python benchmark/run_benchmark.py --setup \
-        --engine-url http://<engine-host>:<port>/v1 --model <model-name> \
-        --api-key <api-key>
-
-Engine access can also be provided via ASCEND_ENGINE_URL / ASCEND_MODEL /
-ASCEND_API_KEY environment variables. There is NO simulated fallback: if the
-engine is unreachable the runner exits with guidance.
-
-Four agents over the same financial task set (single variable per pair):
-
-- ``lc-baseline``  deepagents + native ChatOpenAI
-- ``lc-affinity``  deepagents + AscendAffinityChatModel (salt/prefix/release)
-- ``oj-baseline``  openJiuwen ReActAgent, provider OpenAI, KV release off
-- ``oj-affinity``  openJiuwen ReActAgent, provider InferenceAffinity, on
-
-Rounds are baselined: byte-identical inputs (task fingerprint recorded),
-rotated agent order per round, one untimed warm-up per agent per round,
-cross-round medians as headline numbers. The Markdown report renders a
-lab sheet: per-metric reference ranges plus PASS/WARN/FAIL verdicts, an
-overall verdict and a suspected-false-affinity alert.
+Split out of ``run_benchmark.py`` (the CLI) so the module stays under the
+pylint size budget. Everything here assumes it is imported as part of the
+``benchmark`` package from the repository root.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
-import os
-import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -40,10 +17,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -62,8 +35,6 @@ from benchmark.metrics import (
     sample_sidecar,
     verdict_text,
 )
-
-_REPORT_DIR_DEFAULT = Path(__file__).resolve().parent / "reports"
 
 ALL_AGENTS = ("lc-baseline", "lc-affinity", "oj-baseline", "oj-affinity")
 BASELINE_OF = {"lc-affinity": "lc-baseline", "oj-affinity": "oj-baseline"}
@@ -92,15 +63,23 @@ class EngineConfig:
 class LlmCallRecord:
     """One LLM call observed via callbacks (timing + token usage)."""
 
-    run_id: str
     agent: str
     task_id: str
     round_idx: int
     ttft_ms: Optional[float]
     e2e_ms: float
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-    cached_tokens: Optional[int] = None
+    usage: Optional[Tuple[int, int, int]] = None  # (prompt, completion, cached)
+
+    def to_metrics(self) -> CallMetrics:
+        """Convert to the shared metric schema."""
+        return CallMetrics(
+            agent=self.agent,
+            task_id=self.task_id,
+            round_idx=self.round_idx,
+            ttft_ms=self.ttft_ms,
+            e2e_ms=self.e2e_ms,
+            usage=self.usage,
+        )
 
 
 @dataclass
@@ -109,11 +88,9 @@ class TaskResult:
 
     agent: str
     task_id: str
-    category: str
     round_idx: int
     turn_e2e_ms: List[float] = field(default_factory=list)
-    keyword_hits: int = 0
-    keywords_total: int = 0
+    keyword_score: str = "0/0"
     error: Optional[str] = None
     final_reply: str = ""
 
@@ -139,12 +116,6 @@ class TTFTRecorder(BaseCallbackHandler):
         self.calls: List[LlmCallRecord] = []
         self._active: Dict[UUID, Dict[str, Any]] = {}
 
-    def _label(self, metadata: Optional[Dict[str, Any]]) -> Tuple[str, str]:
-        meta = metadata or {}
-        return str(meta.get("bench_agent", self.agent_name)), str(
-            meta.get("bench_task", "?")
-        )
-
     def on_llm_start(
         self,
         serialized: Dict[str, Any],
@@ -154,11 +125,11 @@ class TTFTRecorder(BaseCallbackHandler):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
-        agent, task = self._label(metadata)
+        meta = metadata or {}
         self._active[run_id] = {
             "start": time.perf_counter(),
-            "agent": agent,
-            "task": task,
+            "agent": str(meta.get("bench_agent", self.agent_name)),
+            "task": str(meta.get("bench_task", "?")),
             "first": None,
         }
 
@@ -178,55 +149,35 @@ class TTFTRecorder(BaseCallbackHandler):
         if entry is None:
             return
         self.calls.append(
-            _record_from_response(entry, run_id, response, self.round_idx)
+            LlmCallRecord(
+                agent=entry["agent"],
+                task_id=entry["task"],
+                round_idx=self.round_idx,
+                ttft_ms=_ttft_ms(entry),
+                e2e_ms=(time.perf_counter() - entry["start"]) * 1000.0,
+                usage=_usage_tuple(response),
+            )
         )
 
 
-def _record_from_response(
-    entry: Dict[str, Any], run_id: UUID, response: Any, round_idx: int
-) -> LlmCallRecord:
-    """Build one call record incl. usage from the LLMResult generations."""
-    end = time.perf_counter()
+def _ttft_ms(entry: Dict[str, Any]) -> Optional[float]:
     first = entry["first"]
-    prompt_tokens = completion_tokens = cached_tokens = None
+    return (first - entry["start"]) * 1000.0 if first else None
+
+
+def _usage_tuple(response: Any) -> Optional[Tuple[int, int, int]]:
+    """Extract (prompt, completion, cached) from the LLMResult generations."""
     try:
         message = response.generations[0][0].message
         usage = message.usage_metadata
-        prompt_tokens = getattr(usage, "input_tokens", None)
-        completion_tokens = getattr(usage, "output_tokens", None)
         details = getattr(usage, "input_token_details", None)
-        cached_tokens = getattr(details, "cache_read", None)
-    except (AttributeError, IndexError, TypeError):
-        pass
-    return LlmCallRecord(
-        run_id=str(run_id),
-        agent=entry["agent"],
-        task_id=entry["task"],
-        round_idx=round_idx,
-        ttft_ms=(first - entry["start"]) * 1000.0 if first else None,
-        e2e_ms=(end - entry["start"]) * 1000.0,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cached_tokens=cached_tokens,
-    )
-
-
-def records_to_metrics(records: List[LlmCallRecord]) -> List[CallMetrics]:
-    """Convert recorder records to the shared metric schema (skip warmups)."""
-    return [
-        CallMetrics(
-            agent=record.agent,
-            task_id=record.task_id,
-            round_idx=record.round_idx,
-            ttft_ms=record.ttft_ms,
-            e2e_ms=record.e2e_ms,
-            prompt_tokens=record.prompt_tokens,
-            completion_tokens=record.completion_tokens,
-            cached_tokens=record.cached_tokens,
+        return (
+            usage.input_tokens,
+            usage.output_tokens,
+            getattr(details, "cache_read", 0) or 0,
         )
-        for record in records
-        if record.task_id != "warmup"
-    ]
+    except (AttributeError, IndexError, TypeError):
+        return None
 
 
 # -- engine probing -------------------------------------------------------------
@@ -302,18 +253,48 @@ def probe_engine(engine: EngineConfig) -> Dict[str, Any]:
 # -- task execution --------------------------------------------------------------
 
 
-def _score_keywords(reply: str, task: Any, error: Optional[str]) -> Tuple[int, int]:
-    hits = sum(1 for keyword in task.expected_keywords if keyword in reply)
-    return (hits if error is None else 0), len(task.expected_keywords)
+def _score_reply(reply: str, task: Any, error: Optional[str]) -> str:
+    hits = sum(
+        1 for keyword in task.expected_keywords if keyword in reply
+    ) if error is None else 0
+    return f"{hits}/{len(task.expected_keywords)}"
+
+
+def _next_conversation(
+    conversation: List[BaseMessage],
+    user_positions: Dict[int, int],
+    task: Any,
+    turn_idx: int,
+    turn_text: str,
+) -> None:
+    """Append the next user turn in place; rewrite history on corrections."""
+    if turn_idx == 0:
+        return
+    if task.edit_replaces_turn == turn_idx - 1:
+        position = user_positions[task.edit_replaces_turn]
+        conversation[position] = HumanMessage(content=task.edit_replacement)
+        del conversation[position + 1 :]
+    conversation.append(HumanMessage(content=turn_text))
+    user_positions[turn_idx] = len(conversation) - 1
+
+
+def _last_ai_reply(messages: List[BaseMessage]) -> str:
+    return next(
+        (
+            str(message.content)
+            for message in reversed(messages)
+            if isinstance(message, AIMessage) and message.content
+        ),
+        "",
+    )
 
 
 async def run_lc_task(
     spec: AgentSpec, task: Any, round_idx: int, turn_timeout: float
 ) -> TaskResult:
     """One deepagents advisor over one task's full dialogue."""
-    recorder = spec.recorder
     config = {
-        "callbacks": [recorder],
+        "callbacks": [spec.recorder],
         "metadata": {
             "session_id": f"bench-{spec.name}-{task.task_id}-r{round_idx}",
             "bench_agent": spec.name,
@@ -325,14 +306,9 @@ async def run_lc_task(
     user_positions: Dict[int, int] = {0: 0}
     turn_e2e: List[float] = []
     error: Optional[str] = None
+    reply = ""
     for turn_idx, turn_text in enumerate(task.turns):
-        if turn_idx > 0:
-            if task.edit_replaces_turn == turn_idx - 1:
-                position = user_positions[task.edit_replaces_turn]
-                conversation[position] = HumanMessage(content=task.edit_replacement)
-                del conversation[position + 1 :]
-            conversation.append(HumanMessage(content=turn_text))
-            user_positions[turn_idx] = len(conversation) - 1
+        _next_conversation(conversation, user_positions, task, turn_idx, turn_text)
         started = time.perf_counter()
         try:
             state = await asyncio.wait_for(
@@ -343,34 +319,16 @@ async def run_lc_task(
             error = f"turn {turn_idx}: {exc}"
             break
         turn_e2e.append(round((time.perf_counter() - started) * 1000.0, 1))
-        reply = next(
-            (
-                str(message.content)
-                for message in reversed(state["messages"])
-                if isinstance(message, AIMessage) and message.content
-            ),
-            "",
-        )
+        reply = _last_ai_reply(state["messages"])
         conversation = conversation + [AIMessage(content=reply)]
-    final_reply = next(
-        (
-            str(message.content)
-            for message in reversed(conversation)
-            if isinstance(message, AIMessage)
-        ),
-        "",
-    )
-    hits, total = _score_keywords(final_reply, task, error)
     return TaskResult(
         agent=spec.name,
         task_id=task.task_id,
-        category=task.category,
         round_idx=round_idx,
         turn_e2e_ms=turn_e2e,
-        keyword_hits=hits,
-        keywords_total=total,
+        keyword_score=_score_reply(reply, task, error),
         error=error,
-        final_reply=final_reply[:2000],
+        final_reply=reply[:2000],
     )
 
 
@@ -404,21 +362,20 @@ async def run_oj_task(
             if isinstance(result, dict)
             else getattr(result, "content", str(result))
         )
-    hits, total = _score_keywords(reply, task, error)
     return TaskResult(
         agent=spec.name,
         task_id=task.task_id,
-        category=task.category,
         round_idx=round_idx,
         turn_e2e_ms=turn_e2e,
-        keyword_hits=hits,
-        keywords_total=total,
+        keyword_score=_score_reply(reply, task, error),
         error=error,
         final_reply=str(reply)[:2000],
     )
 
 
-async def run_task(spec: AgentSpec, task: Any, round_idx: int, timeout: float) -> TaskResult:
+async def run_task(
+    spec: AgentSpec, task: Any, round_idx: int, timeout: float
+) -> TaskResult:
     """Dispatch one task to the right framework runner."""
     runner = run_lc_task if spec.kind == "lc" else run_oj_task
     return await runner(spec, task, round_idx, timeout)
@@ -462,6 +419,46 @@ async def run_warmup(spec: AgentSpec, round_idx: int) -> None:
 # -- agent building --------------------------------------------------------------
 
 
+def _build_lc_spec(
+    name: str, engine: EngineConfig, round_idx: int
+) -> AgentSpec:
+    """Build one deepagents spec (baseline or affinity model)."""
+    from benchmark.agents import build_agent, build_affinity_model, build_baseline_model
+
+    builder = (
+        build_baseline_model if name == "lc-baseline" else build_affinity_model
+    )
+    model = builder(
+        model=engine.model, base_url=engine.base_url, api_key=engine.api_key
+    )
+    return AgentSpec(
+        name=name,
+        kind="lc",
+        agent=build_agent(model),
+        recorder=TTFTRecorder(name, round_idx),
+        affinity_source=model if name == "lc-affinity" else None,
+    )
+
+
+async def _build_oj_spec(
+    name: str, engine: EngineConfig, round_idx: int
+) -> AgentSpec:
+    """Build one openJiuwen spec (provider InferenceAffinity or OpenAI)."""
+    from benchmark.oj_adapter import OJCallCollector, build_openjiuwen_agent
+
+    collector = OJCallCollector(name)
+    agent = await build_openjiuwen_agent(
+        affinity=name == "oj-affinity",
+        model=engine.model,
+        base_url=engine.base_url,
+        api_key=engine.api_key,
+        collector=collector,
+    )
+    return AgentSpec(
+        name=name, kind="oj", agent=agent, collector=collector, affinity_source=None
+    )
+
+
 async def build_agents(
     names: List[str], engine: EngineConfig, round_idx: int
 ) -> List[AgentSpec]:
@@ -469,50 +466,9 @@ async def build_agents(
     specs: List[AgentSpec] = []
     for name in names:
         if name.startswith("lc-"):
-            from benchmark.agents import build_agent, build_affinity_model, build_baseline_model
-
-            model = (
-                build_baseline_model(
-                    model=engine.model,
-                    base_url=engine.base_url,
-                    api_key=engine.api_key,
-                )
-                if name == "lc-baseline"
-                else build_affinity_model(
-                    model=engine.model,
-                    base_url=engine.base_url,
-                    api_key=engine.api_key,
-                )
-            )
-            specs.append(
-                AgentSpec(
-                    name=name,
-                    kind="lc",
-                    agent=build_agent(model),
-                    recorder=TTFTRecorder(name, round_idx),
-                    affinity_source=model if name == "lc-affinity" else None,
-                )
-            )
+            specs.append(_build_lc_spec(name, engine, round_idx))
         else:
-            from benchmark.oj_adapter import OJCallCollector, build_openjiuwen_agent
-
-            collector = OJCallCollector(name)
-            agent = await build_openjiuwen_agent(
-                affinity=name == "oj-affinity",
-                model=engine.model,
-                base_url=engine.base_url,
-                api_key=engine.api_key,
-                collector=collector,
-            )
-            specs.append(
-                AgentSpec(
-                    name=name,
-                    kind="oj",
-                    agent=agent,
-                    collector=collector,
-                    affinity_source=None,
-                )
-            )
+            specs.append(await _build_oj_spec(name, engine, round_idx))
     return specs
 
 
@@ -529,29 +485,78 @@ class PhaseWindow:
     cache_usage_peak: Optional[float] = None
     npu_samples: List[Dict[str, float]] = field(default_factory=list)
 
+    def as_dict(self) -> Dict[str, Any]:
+        """JSON-ready projection."""
+        return {
+            "hit_rate_delta": self.hit_rate_delta,
+            "cache_usage_peak": self.cache_usage_peak,
+            "npu_samples": self.npu_samples,
+        }
+
+
+@dataclass
+class RoundBundle:
+    """Mutable collectors shared across one round of all agents."""
+
+    per_agent_records: Dict[str, List[Any]]
+    per_agent_rounds: Dict[str, List[AgentMetrics]]
+    windows: Dict[str, List[PhaseWindow]]
+    results: List[TaskResult]
+    affinity_stats: Dict[str, Dict[str, int]]
+
+    @classmethod
+    def create(cls, agent_names: List[str]) -> "RoundBundle":
+        """Empty bundle for the given agents."""
+        return cls(
+            per_agent_records={name: [] for name in agent_names},
+            per_agent_rounds={name: [] for name in agent_names},
+            windows={name: [] for name in agent_names},
+            results=[],
+            affinity_stats={},
+        )
+
+
+def _collect_call_metrics(spec: AgentSpec) -> Tuple[List[Any], List[CallMetrics]]:
+    """Fetch per-call records (warm-ups dropped) + shared-schema metrics."""
+    if spec.kind == "lc":
+        records = [
+            record for record in spec.recorder.calls if record.task_id != "warmup"
+        ]
+        return records, [record.to_metrics() for record in records]
+    spec.collector.drop_warmup()
+    records = list(spec.collector.records)
+    return records, list(records)
+
+
+def _absorb_round(spec: AgentSpec, bundle: RoundBundle) -> None:
+    """Merge one finished agent phase into the shared bundle."""
+    records, call_metrics = _collect_call_metrics(spec)
+    bundle.per_agent_records[spec.name].extend(records)
+    bundle.per_agent_rounds[spec.name].append(aggregate(call_metrics))
+    if spec.affinity_source is not None:
+        stats = getattr(spec.affinity_source, "affinity_stats", {})
+        bundle.affinity_stats[spec.name] = dict(stats)
+
 
 async def run_agent_phase(
     spec: AgentSpec,
     tasks: List[Any],
     round_idx: int,
-    args: argparse.Namespace,
-    metrics_url: str,
+    args: Any,
 ) -> Tuple[List[TaskResult], PhaseWindow]:
     """Warm-up + all tasks for one agent, wrapped in engine-side snapshots."""
-    window = PhaseWindow(prom_before=fetch_prometheus(metrics_url))
+    window = PhaseWindow(prom_before=fetch_prometheus(args.metrics_url or ""))
     window.npu_samples.append(sample_sidecar(args.npu_cmd) or {})
     await run_warmup(spec, round_idx)
     semaphore = asyncio.Semaphore(args.max_parallel)
 
     async def one(task: Any) -> TaskResult:
         async with semaphore:
-            print(
-                f"[r{round_idx}][{spec.name}] {task.task_id} ...", flush=True
-            )
+            print(f"[r{round_idx}][{spec.name}] {task.task_id} ...", flush=True)
             return await run_task(spec, task, round_idx, args.turn_timeout)
 
     results = list(await asyncio.gather(*(one(task) for task in tasks)))
-    window.prom_after = fetch_prometheus(metrics_url)
+    window.prom_after = fetch_prometheus(args.metrics_url or "")
     window.npu_samples.append(sample_sidecar(args.npu_cmd) or {})
     window.hit_rate_delta = cache_hit_rate_delta(
         window.prom_before, window.prom_after
@@ -572,67 +577,36 @@ async def run_benchmark(
     engine: EngineConfig,
     tasks: List[Any],
     agent_names: List[str],
-    args: argparse.Namespace,
+    args: Any,
 ) -> Dict[str, Any]:
-    """All rounds (rotated order) + optional longrun phase."""
-    per_agent_records: Dict[str, List[Any]] = {
-        name: [] for name in agent_names
-    }
-    per_agent_rounds: Dict[str, List[AgentMetrics]] = {
-        name: [] for name in agent_names
-    }
-    windows: Dict[str, List[PhaseWindow]] = {name: [] for name in agent_names}
-    results: List[TaskResult] = []
-    affinity_stats: Dict[str, Dict[str, int]] = {}
+    """All rounds (rotated order); returns summaries/results/raw calls."""
+    bundle = RoundBundle.create(agent_names)
     for round_idx in range(args.rounds):
         order = rotate(agent_names, round_idx)
         print(f"=== round {round_idx + 1}/{args.rounds} order={order} ===", flush=True)
-        specs = await build_agents(order, engine, round_idx)
-        for spec in specs:
+        for spec in await build_agents(order, engine, round_idx):
             round_results, window = await run_agent_phase(
-                spec, tasks, round_idx, args, args.metrics_url or ""
+                spec, tasks, round_idx, args
             )
-            results.extend(round_results)
-            if spec.kind == "lc":
-                records = [
-                    record
-                    for record in spec.recorder.calls
-                    if record.task_id != "warmup"
-                ]
-                call_metrics = records_to_metrics(records)
-            else:
-                spec.collector.drop_warmup()
-                call_metrics = list(spec.collector.records)
-                records = list(call_metrics)
-            per_agent_records[spec.name].extend(records)
-            per_agent_rounds[spec.name].append(aggregate(call_metrics))
-            windows[spec.name].append(window)
-            if spec.affinity_source is not None:
-                affinity_stats[spec.name] = dict(
-                    getattr(spec.affinity_source, "affinity_stats", {})
-                )
-    summaries: Dict[str, Dict[str, Any]] = {}
-    for name in agent_names:
-        rounds_metrics = per_agent_rounds[name]
-        all_records = per_agent_records[name]
-        summaries[name] = {
-            "median": asdict(median_metrics(rounds_metrics)),
-            "per_round": [asdict(m) for m in rounds_metrics],
-            "affinity_stats": affinity_stats.get(name, {}),
-            "engine_windows": [
-                {
-                    "hit_rate_delta": w.hit_rate_delta,
-                    "cache_usage_peak": w.cache_usage_peak,
-                    "npu_samples": w.npu_samples,
-                }
-                for w in windows[name]
-            ],
+            bundle.results.extend(round_results)
+            bundle.windows[spec.name].append(window)
+            _absorb_round(spec, bundle)
+    summaries = {
+        name: {
+            "median": asdict(median_metrics(bundle.per_agent_rounds[name])),
+            "per_round": [asdict(m) for m in bundle.per_agent_rounds[name]],
+            "affinity_stats": bundle.affinity_stats.get(name, {}),
+            "engine_windows": [w.as_dict() for w in bundle.windows[name]],
         }
+        for name in agent_names
+    }
     return {
         "summaries": summaries,
-        "results": results,
+        "results": [asdict(r) for r in bundle.results],
         "llm_calls": [
-            asdict(record) for name in agent_names for record in per_agent_records[name]
+            asdict(record)
+            for name in agent_names
+            for record in bundle.per_agent_records[name]
         ],
     }
 
@@ -648,6 +622,13 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _flat_metrics(agent: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten the nested timing/tokens groups for metric lookups."""
+    timing = agent.get("timing") or {}
+    tokens = agent.get("tokens") or {}
+    return {**timing, **tokens}
+
+
 def _version_of(package: str) -> str:
     from importlib import metadata
 
@@ -661,7 +642,8 @@ def _render_lab_sheet(
     pair_name: str, affinity: Dict[str, Any], baseline: Dict[str, Any]
 ) -> List[str]:
     """One lab-sheet table: affinity agent vs its same-framework baseline."""
-    aff, base = affinity["median"], baseline["median"]
+    aff = _flat_metrics(affinity["median"])
+    base = _flat_metrics(baseline["median"])
     verdicts = [
         judge(metric, aff.get(metric), base.get(metric)) for metric in VERDICT_METRICS
     ]
@@ -677,8 +659,8 @@ def _render_lab_sheet(
     ]
     for verdict in verdicts:
         rows.append(
-            f"| {verdict.label} | {verdict.reference} | "
-            f"{verdict_text(verdict)} | {PASS_MARK[verdict.status]} |"
+            f"| {verdict.label} | {verdict.reference} "
+            f"| {verdict_text(verdict)} | {PASS_MARK[verdict.status]} |"
         )
     rows += ["", f"**结论：{overall_verdict(verdicts, npu_moved)}**", ""]
     return rows
@@ -688,42 +670,44 @@ def _render_rounds_table(
     agent_names: List[str], summaries: Dict[str, Dict[str, Any]]
 ) -> List[str]:
     rows = [
-        "| Agent | 轮次 | LLM调用 | TTFT mean(ms) | E2E mean(ms) | KV命中率 | Prefill/call |",
+        "| Agent | 轮次 | LLM调用 | TTFT mean(ms) | E2E mean(ms) |"
+        " KV命中率 | Prefill/call |",
         "|---|---|---|---|---|---|---|",
     ]
     for name in agent_names:
         for round_idx, metrics in enumerate(summaries[name]["per_round"]):
+            flat = _flat_metrics(metrics)
             rows.append(
                 f"| {name} | {round_idx + 1} | {metrics['llm_calls']} "
-                f"| {_fmt(metrics['ttft_mean_ms'])} | {_fmt(metrics['e2e_mean_ms'])} "
-                f"| {_fmt(metrics['kv_hit_rate'])}% "
-                f"| {_fmt(metrics['prefill_per_call'])} |"
+                f"| {_fmt(flat.get('ttft_mean_ms'))} "
+                f"| {_fmt(flat.get('e2e_mean_ms'))} "
+                f"| {_fmt(flat.get('kv_hit_rate'))}% "
+                f"| {_fmt(flat.get('prefill_per_call'))} |"
             )
     return rows
 
 
 def _render_correctness(
-    tasks: List[Any], results: List[TaskResult], agent_names: List[str]
+    tasks: List[Any],
+    results: List[Dict[str, Any]],
+    agent_names: List[str],
 ) -> List[str]:
-    by_key = {(r.agent, r.task_id): r for r in results}
-    header = "| 任务 | " + " | ".join(agent_names) + " |"
+    by_key = {(r["agent"], r["task_id"]): r for r in results}
     rows = [
         "## 5. 正确性（关键词得分按任务）",
         "",
-        header,
+        f"| 任务 | {' | '.join(agent_names)} |",
         "|" + "---|" * (len(agent_names) + 1),
     ]
     for task in tasks:
         cells = []
         for name in agent_names:
             record = by_key.get((name, task.task_id))
-            score = (
-                f"{record.keyword_hits}/{record.keywords_total}" if record else "n/a"
-            )
-            if record and record.error:
-                score += f" ⚠️{record.error[:40]}"
+            score = record["keyword_score"] if record else "n/a"
+            if record and record.get("error"):
+                score += f" ⚠️{str(record['error'])[:40]}"
             cells.append(score)
-        rows.append(f"| {task.task_id} | " + " | ".join(cells) + " |")
+        rows.append(f"| {task.task_id} ({task.category}) | " + " | ".join(cells) + " |")
     return rows
 
 
@@ -735,35 +719,18 @@ def _render_affinity_evidence(
         if "affinity" not in name:
             continue
         stats = summaries[name].get("affinity_stats", {})
-        rows.append(
-            f"- **{name}** 亲和计数：{stats or '（openJiuwen 侧见引擎日志）'}"
-        )
-        hit_rates = [
-            window.get("hit_rate_delta")
-            for window in summaries[name]["engine_windows"]
-            if window.get("hit_rate_delta") is not None
-        ]
+        rows.append(f"- **{name}** 亲和计数：{stats or '（openJiuwen 侧见引擎日志）'}")
+        windows = summaries[name]["engine_windows"]
+        hit_rates = [w["hit_rate_delta"] for w in windows if w["hit_rate_delta"] is not None]
         if hit_rates:
-            rows.append(
-                f"  - 引擎侧前缀命中率（各轮窗口）：{hit_rates}"
-            )
-        peaks = [
-            window.get("cache_usage_peak")
-            for window in summaries[name]["engine_windows"]
-            if window.get("cache_usage_peak") is not None
-        ]
+            rows.append(f"  - 引擎侧前缀命中率（各轮窗口）：{hit_rates}")
+        peaks = [w["cache_usage_peak"] for w in windows if w["cache_usage_peak"] is not None]
         if peaks:
             rows.append(f"  - KV Cache 占用峰值：{peaks}")
-        npu = [
-            window.get("npu_samples")
-            for window in summaries[name]["engine_windows"]
-            if any(window.get("npu_samples", []))
-        ]
+        npu = [w["npu_samples"] for w in windows if any(w["npu_samples"])]
         if npu:
             rows.append(f"  - NPU 采样：{npu}")
-    rows.append(
-        "- 未配置 --metrics-url / --npu-cmd 时引擎侧指标为 ➖，不影响客户端判定。"
-    )
+    rows.append("- 未配置 --metrics-url / --npu-cmd 时引擎侧指标为 ➖，不影响客户端判定。")
     return rows
 
 
@@ -774,13 +741,13 @@ def render_report_md(
     tasks: List[Any],
     agent_names: List[str],
     summaries: Dict[str, Dict[str, Any]],
-    results: List[TaskResult],
-    args: argparse.Namespace,
+    results: List[Dict[str, Any]],
+    args: Any,
     fingerprint: str,
     json_name: str,
 ) -> str:
     """Render the full lab-sheet Markdown report."""
-    sections = [
+    env_lines = [
         "# 昇腾算力亲和基准测试报告（4 Agent 化验单）",
         "",
         "## 1. 测试环境",
@@ -813,12 +780,12 @@ def render_report_md(
     ]
     for affinity_name, baseline_name in BASELINE_OF.items():
         if affinity_name in summaries and baseline_name in summaries:
-            sections += _render_lab_sheet(
+            env_lines += _render_lab_sheet(
                 f"{affinity_name} vs {baseline_name}",
                 summaries[affinity_name],
                 summaries[baseline_name],
             )
-    sections += [
+    tail_lines = [
         "## 4. 分轮明细（每 Agent 每轮）",
         "",
         *_render_rounds_table(agent_names, summaries),
@@ -845,90 +812,25 @@ def render_report_md(
         f"- 每次调用的原始记录（时延+token 用量）：`{json_name}`",
         "",
     ]
-    return "\n".join(sections)
-
-
-# -- entry point --------------------------------------------------------------------
-
-
-def parse_args() -> argparse.Namespace:
-    """CLI arguments; engine params fall back to environment variables."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--engine-url", default=None, help="OpenAI-compatible base URL; falls back to ASCEND_ENGINE_URL")
-    parser.add_argument("--model", default=None, help="model name; falls back to ASCEND_MODEL")
-    parser.add_argument("--api-key", default=None, help="API key; falls back to ASCEND_API_KEY (default EMPTY)")
-    parser.add_argument("--setup", action="store_true", help="pip-install benchmark/requirements.txt before running")
-    parser.add_argument("--agents", default="all", help="all | lc | oj | comma list of agent names")
-    parser.add_argument("--rounds", type=int, default=3, help="full task-set rounds per agent (median as headline)")
-    parser.add_argument("--include-longrun", action="store_true", help="add the 25-customer sweep task (~100-150 calls)")
-    parser.add_argument("--max-parallel", type=int, default=2, help="concurrent tasks per phase")
-    parser.add_argument("--turn-timeout", type=float, default=240.0, help="per-turn timeout (s)")
-    parser.add_argument("--metrics-url", default=None, help="optional vLLM /metrics URL for engine-side cache metrics")
-    parser.add_argument("--npu-cmd", default=None, help="optional sampler command printing key=value pairs (NPU util/HBM)")
-    parser.add_argument("--report-dir", default=str(_REPORT_DIR_DEFAULT), help="report output dir")
-    return parser.parse_args()
-
-
-def resolve_agents(value: str) -> List[str]:
-    """Resolve the --agents selection to concrete agent names."""
-    if value == "all":
-        return list(ALL_AGENTS)
-    if value == "lc":
-        return ["lc-baseline", "lc-affinity"]
-    if value == "oj":
-        return ["oj-baseline", "oj-affinity"]
-    names = [name.strip() for name in value.split(",") if name.strip()]
-    unknown = [name for name in names if name not in ALL_AGENTS]
-    if unknown:
-        print(f"未知 agent：{unknown}，可选 {ALL_AGENTS}")
-        sys.exit(2)
-    return names
-
-
-def resolve_engine(args: argparse.Namespace) -> EngineConfig:
-    """Resolve engine URL/model/key from args + environment."""
-    url = args.engine_url or os.environ.get("ASCEND_ENGINE_URL", "")
-    model = args.model or os.environ.get("ASCEND_MODEL", "")
-    api_key = args.api_key or os.environ.get("ASCEND_API_KEY", "EMPTY")
-    if not url or not model:
-        print(
-            "缺少引擎参数：请通过 --engine-url/--model 或环境变量 "
-            "ASCEND_ENGINE_URL/ASCEND_MODEL 提供真实昇腾引擎（MindIE / vLLM-Ascend）。"
-            "本基准测试不提供模拟引擎。"
-        )
-        sys.exit(2)
-    base = url.rstrip("/")
-    if not base.endswith("/v1"):
-        base = f"{base}/v1"
-    return EngineConfig(base_url=base, engine_root=base[: -len("/v1")], model=model, api_key=api_key)
-
-
-def run_setup() -> None:
-    """Install benchmark-only dependencies (idempotent)."""
-    requirements = str(_REPO_ROOT / "benchmark" / "requirements.txt")
-    print(f"[setup] pip install -r {requirements}")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", requirements], check=True
-    )
+    return "\n".join(env_lines + tail_lines)
 
 
 def write_reports(
     *,
-    report_dir: str,
+    report_dir: Path,
     engine: EngineConfig,
     probe: Dict[str, Any],
     tasks: List[Any],
     agent_names: List[str],
     data: Dict[str, Any],
-    args: argparse.Namespace,
+    args: Any,
     fingerprint: str,
 ) -> Path:
     """Write the JSON + Markdown reports; returns the Markdown path."""
-    out_dir = Path(report_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    report_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json_path = out_dir / f"benchmark_report_{stamp}.json"
-    md_path = out_dir / f"benchmark_report_{stamp}.md"
+    json_path = report_dir / f"benchmark_report_{stamp}.json"
+    md_path = report_dir / f"benchmark_report_{stamp}.md"
     json_path.write_text(
         json.dumps(
             {
@@ -962,50 +864,3 @@ def write_reports(
         encoding="utf-8",
     )
     return md_path
-
-
-def main() -> None:
-    """One-click entry: setup -> probe -> rounds of 4 agents -> lab report."""
-    args = parse_args()
-    if args.setup:
-        run_setup()
-    engine = resolve_engine(args)
-    agent_names = resolve_agents(args.agents)
-    from benchmark.tasks import load_longrun_tasks, load_tasks, task_fingerprint
-
-    print(f"[probe] {engine.base_url} model={engine.model}")
-    probe = probe_engine(engine)
-    if not probe.get("reachable"):
-        print(
-            f"[probe] 引擎不可达：{probe.get('error')}\n"
-            "请确认地址正确、服务已启动，且本机可访问该引擎。"
-            "本基准测试不提供模拟引擎。"
-        )
-        sys.exit(2)
-    print(
-        f"[probe] model_listed={probe.get('model_listed')} "
-        f"release_endpoint={probe.get('release_endpoint')} "
-        f"streaming={probe.get('streaming')}"
-    )
-    tasks = load_tasks()
-    if args.include_longrun:
-        tasks += load_longrun_tasks()
-    fingerprint = task_fingerprint(args.include_longrun)
-    data = asyncio.run(run_benchmark(engine, tasks, agent_names, args))
-    md_path = write_reports(
-        report_dir=args.report_dir,
-        engine=engine,
-        probe=probe,
-        tasks=tasks,
-        agent_names=agent_names,
-        data=data,
-        args=args,
-        fingerprint=fingerprint,
-    )
-    print(f"\n报告：{md_path}")
-    failed = any(result.error for result in data["results"])
-    sys.exit(1 if failed else 0)
-
-
-if __name__ == "__main__":
-    main()

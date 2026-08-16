@@ -25,7 +25,12 @@ ADVISOR_INSTRUCTIONS = """你是一名严谨的中文投资顾问智能体，服
 def build_baseline_model(
     *, model: str, base_url: str, api_key: str = "EMPTY", timeout: float = 120.0
 ) -> Any:
-    """Native LangChain OpenAI chat model against the same engine."""
+    """Native LangChain OpenAI chat model against the same engine.
+
+    ``streaming=True`` makes invoke() aggregate an SSE stream internally,
+    emitting on_llm_new_token callbacks so client-side TTFT is measurable
+    (identical sampling on both sides of the pair).
+    """
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
@@ -34,6 +39,7 @@ def build_baseline_model(
         api_key=api_key,
         temperature=0.3,
         timeout=timeout,
+        streaming=True,
     )
 
 
@@ -53,6 +59,7 @@ def build_affinity_model(
         api_key=api_key,
         temperature=0.3,
         timeout=timeout,
+        streaming=True,
     )
 
 

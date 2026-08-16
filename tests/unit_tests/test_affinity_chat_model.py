@@ -376,3 +376,68 @@ class TestAffinityStats:
             "releases_attempted": 0,
             "releases_failed": 0,
         }
+
+
+class TestUsagePassthrough:
+    def test_usage_maps_to_usage_metadata(self, chat_llm, mocker):
+        response = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 40,
+                "total_tokens": 140,
+                "prompt_tokens_details": {"cached_tokens": 80},
+            },
+        }
+        _patch_post(chat_llm, mocker, response)
+        message = chat_llm.invoke([HumanMessage(content="hi")])
+        assert message.usage_metadata == {
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "total_tokens": 140,
+            "input_token_details": {"cache_read": 80},
+        }
+
+    def test_missing_usage_leaves_metadata_none(self, chat_llm, mocker):
+        _patch_post(chat_llm, mocker)
+        message = chat_llm.invoke([HumanMessage(content="hi")])
+        assert message.usage_metadata is None
+
+    def test_streaming_invoke_aggregates_chunks_and_usage(self, mocker):
+        from langchain_core.callbacks import BaseCallbackHandler
+
+        class _TokenCollector(BaseCallbackHandler):
+            def __init__(self) -> None:
+                self.tokens: List[str] = []
+
+            def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+                if token:  # framework also emits empty finalization tokens
+                    self.tokens.append(token)
+
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", streaming=True
+        )
+        events = [
+            _content_event("Hel"),
+            _content_event("lo"),
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                },
+            },
+        ]
+        collector = _TokenCollector()
+        mocker.patch.object(model, "_stream_events", return_value=iter(events))
+        message = model.invoke(
+            [HumanMessage(content="q")], config={"callbacks": [collector]}
+        )
+        assert message.content == "Hello"
+        assert message.usage_metadata == {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+        }
+        assert collector.tokens == ["Hel", "lo"]
