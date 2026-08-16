@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -73,8 +74,6 @@ class TestRequestContract:
         assert payload["cache_salt"] == "per-call-session"
 
     def test_session_from_run_manager_metadata(self, mocker):
-        from types import SimpleNamespace
-
         model = AscendAffinityChatModel(base_url="http://engine.test/v1")
         post = _patch_post(model, mocker)
         manager = SimpleNamespace(metadata={"session_id": "meta-session"})
@@ -225,3 +224,155 @@ class TestToolCalling:
     def test_llm_type_and_export(self, chat_llm):
         assert chat_llm._llm_type == "ascend-affinity-chat"
         assert json.loads(json.dumps(chat_llm.model)) == chat_llm.model
+
+
+class _FakeSSE:
+    """urlopen stub serving an OpenAI SSE body built from JSON events."""
+
+    def __init__(self, payloads: List[Dict[str, Any]]) -> None:
+        self._lines = [f"data: {json.dumps(p)}".encode() for p in payloads]
+        self._lines.append(b"data: [DONE]")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def _content_event(text: str) -> Dict[str, Any]:
+    return {"choices": [{"index": 0, "delta": {"content": text}}]}
+
+
+def _patch_sse(model: AscendAffinityChatModel, mocker, payloads) -> Any:
+    """Patch urlopen to serve ``payloads`` as SSE; return call recorder."""
+    return mocker.patch(
+        "urllib.request.urlopen", return_value=_FakeSSE(payloads)
+    )
+
+
+class TestStreaming:
+    def test_stream_yields_content_chunks(self, chat_llm, mocker):
+        urlopen = _patch_sse(
+            chat_llm, mocker, [_content_event("Hel"), _content_event("lo")]
+        )
+        chunks = list(chat_llm.stream([HumanMessage(content="hi")]))
+        assert "".join(c.text for c in chunks) == "Hello"
+        request = urlopen.call_args[0][0]
+        payload = json.loads(request.data)
+        assert payload["stream"] is True
+        assert payload["cache_sharing"] is True
+        assert payload["cache_salt"] == "fixture-session"
+
+    def test_stream_assembles_tool_call_deltas(self, chat_llm, mocker):
+        events = [
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_9",
+                                    "type": "function",
+                                    "function": {"name": "lookup_quote", "arguments": ""},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": '{"ticker": "A"}'},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+        ]
+        _patch_sse(chat_llm, mocker, events)
+        chunks = list(chat_llm.stream([HumanMessage(content="hi")]))
+        assert chunks[0].tool_call_chunks[0]["name"] == "lookup_quote"
+        full = chunks[0] + chunks[1]
+        assembled = full.tool_calls[0]
+        assert assembled["name"] == "lookup_quote"
+        assert assembled["args"] == {"ticker": "A"}
+        assert assembled["id"] == "call_9"
+        assert assembled["type"] == "tool_call"
+
+    def test_stream_skips_role_only_delta(self, chat_llm, mocker):
+        events = [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            _content_event("hi"),
+        ]
+        _patch_sse(chat_llm, mocker, events)
+        chunks = list(chat_llm.stream([HumanMessage(content="q")]))
+        # the framework appends one empty finalization chunk; only real
+        # deltas may carry content
+        assert [c.text for c in chunks if c.text] == ["hi"]
+
+    def test_stream_notifies_run_manager(self, chat_llm, mocker):
+        _patch_sse(chat_llm, mocker, [_content_event("Hel"), _content_event("lo")])
+        captured: List[str] = []
+
+        def record(token: str) -> None:
+            captured.append(token)
+
+        manager = SimpleNamespace(on_llm_new_token=record)
+        list(chat_llm._stream([HumanMessage(content="q")], run_manager=manager))
+        assert captured == ["Hel", "lo"]
+
+    async def test_astream_streams_tokens(self, chat_llm, mocker):
+        _patch_sse(chat_llm, mocker, [_content_event("a"), _content_event("b")])
+        parts = [c.text async for c in chat_llm.astream([HumanMessage(content="q")])]
+        assert "".join(parts) == "ab"
+
+
+class TestAffinityStats:
+    def test_counters_track_bind_and_failed_release(self, chat_llm, mocker):
+        ok = {"choices": [{"message": {"content": "ok"}}]}
+
+        def fake_post(root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            if path == "/release_kv_cache":
+                raise OSError("engine busy")
+            return ok
+
+        mocker.patch.object(chat_llm, "_post", side_effect=fake_post)
+        chat_llm.invoke([HumanMessage(content="hi"), AIMessage(content="old")])
+        chat_llm.invoke([HumanMessage(content="hi"), AIMessage(content="new")])
+        assert chat_llm.affinity_stats == {
+            "affinity_requests": 2,
+            "salt_bound_requests": 2,
+            "releases_attempted": 1,
+            "releases_failed": 1,
+        }
+
+    def test_stats_property_returns_copy(self, chat_llm, mocker):
+        _patch_post(chat_llm, mocker)
+        chat_llm.invoke([HumanMessage(content="hi")])
+        snapshot = chat_llm.affinity_stats
+        snapshot["affinity_requests"] = 999
+        assert chat_llm.affinity_stats["affinity_requests"] == 1
+
+    def test_disabled_affinity_keeps_zero_counters(self, chat_llm, mocker):
+        chat_llm.enable_affinity = False
+        _patch_post(chat_llm, mocker)
+        chat_llm.invoke([HumanMessage(content="hi")])
+        assert chat_llm.affinity_stats == {
+            "affinity_requests": 0,
+            "salt_bound_requests": 0,
+            "releases_attempted": 0,
+            "releases_failed": 0,
+        }

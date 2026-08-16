@@ -128,6 +128,22 @@ transport):
 python -m pytest tests/unit_tests
 ```
 
+## Benchmark
+
+A single-variable benchmark against a real engine lives in
+[benchmark/](benchmark/): two identical `deepagents` advisors over the same
+financial task set — baseline on native `ChatOpenAI`, experiment on
+`AscendAffinityChatModel`. It measures real TTFT (first token per LLM call)
+and affinity behaviour (salt binding, partial releases):
+
+```bash
+python benchmark/run_benchmark.py --setup \
+  --engine-url http://<engine-host>:<port>/v1 --model <model-name>
+```
+
+See [benchmark/README.md](benchmark/README.md) for configuration and how to
+read the report.
+
 ## Development
 
 ```bash

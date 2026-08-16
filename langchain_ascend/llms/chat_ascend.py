@@ -28,15 +28,20 @@ import asyncio
 import json
 import logging
 import urllib.request
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
 )
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    ToolCallChunk,
+)
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -53,6 +58,16 @@ _ROLE_BY_TYPE = {
     "tool": "tool",
     "chat": "assistant",
 }
+
+
+def _new_affinity_stats() -> Dict[str, int]:
+    """Fresh affinity counter dict (one per model instance)."""
+    return {
+        "affinity_requests": 0,
+        "salt_bound_requests": 0,
+        "releases_attempted": 0,
+        "releases_failed": 0,
+    }
 
 
 def _serialize_message(message: BaseMessage) -> Dict[str, Any]:
@@ -127,10 +142,16 @@ class AscendAffinityChatModel(BaseChatModel):
     )
 
     _prefix_tracker: PrefixCacheTracker = PrivateAttr(default_factory=PrefixCacheTracker)
+    _affinity_stats: Dict[str, int] = PrivateAttr(default_factory=_new_affinity_stats)
 
     @property
     def _llm_type(self) -> str:
         return "ascend-affinity-chat"
+
+    @property
+    def affinity_stats(self) -> Dict[str, int]:
+        """Read-only copy of this instance's affinity counters."""
+        return dict(self._affinity_stats)
 
     # -- tool calling --------------------------------------------------------
 
@@ -160,9 +181,11 @@ class AscendAffinityChatModel(BaseChatModel):
 
     # -- transport -------------------------------------------------------------
 
-    def _post(self, root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """POST ``payload`` as JSON to ``root + path`` and return the body."""
-        request = urllib.request.Request(
+    def _build_request(
+        self, root: str, path: str, payload: Dict[str, Any]
+    ) -> urllib.request.Request:
+        """Build the JSON POST request for ``root + path``."""
+        return urllib.request.Request(
             f"{root.rstrip('/')}{path}",
             data=json.dumps(payload).encode("utf-8"),
             headers={
@@ -171,6 +194,10 @@ class AscendAffinityChatModel(BaseChatModel):
             },
             method="POST",
         )
+
+    def _post(self, root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST ``payload`` as JSON to ``root + path`` and return the body."""
+        request = self._build_request(root, path, payload)
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
@@ -211,15 +238,18 @@ class AscendAffinityChatModel(BaseChatModel):
         """Salt-bind the request and release stale KV blocks when enabled."""
         if not self.enable_affinity:
             return
+        self._affinity_stats["affinity_requests"] += 1
         payload["cache_sharing"] = True
         if not session_id:
             return
+        self._affinity_stats["salt_bound_requests"] += 1
         payload["cache_salt"] = session_id
         if not self.release_endpoint:
             self._prefix_tracker.update(session_id, message_dicts, tools)
             return
         plan = self._prefix_tracker.check_release_needed(session_id, message_dicts, tools)
         if plan is not None:
+            self._affinity_stats["releases_attempted"] += 1
             release_payload: Dict[str, Any] = {
                 "model": self.model,
                 "cache_salt": session_id,
@@ -233,6 +263,7 @@ class AscendAffinityChatModel(BaseChatModel):
             try:
                 self._post(self._engine_root(), self.release_endpoint, release_payload)
             except OSError as exc:
+                self._affinity_stats["releases_failed"] += 1
                 logger.warning(
                     "KV release request failed for session %s: %s", session_id, exc
                 )
@@ -270,6 +301,20 @@ class AscendAffinityChatModel(BaseChatModel):
 
     # -- generation ---------------------------------------------------------------
 
+    def _prepare_request(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]],
+        run_manager: Optional[CallbackManagerForLLMRun],
+        kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Shared prologue: session resolution + payload + affinity pipeline."""
+        session_id = self._resolve_session_id(run_manager, kwargs)
+        tools = kwargs.get("tools")
+        payload = self._build_payload(messages, stop, tools)
+        self._apply_affinity(session_id, payload["messages"], tools, payload)
+        return payload
+
     def _request(
         self,
         messages: List[BaseMessage],
@@ -278,10 +323,7 @@ class AscendAffinityChatModel(BaseChatModel):
         kwargs: Dict[str, Any],
     ) -> ChatResult:
         """Shared sync/async pipeline: affinity injection + one HTTP request."""
-        session_id = self._resolve_session_id(run_manager, kwargs)
-        tools = kwargs.get("tools")
-        payload = self._build_payload(messages, stop, tools)
-        self._apply_affinity(session_id, payload["messages"], tools, payload)
+        payload = self._prepare_request(messages, stop, run_manager, kwargs)
         response = self._post(self.base_url, "/chat/completions", payload)
         return self._parse_chat_result(response)
 
@@ -304,3 +346,64 @@ class AscendAffinityChatModel(BaseChatModel):
         return await asyncio.to_thread(
             self._request, messages, stop, run_manager, kwargs
         )
+
+    # -- streaming ----------------------------------------------------------------
+
+    def _stream_events(
+        self, payload: Dict[str, Any]
+    ) -> Iterator[Dict[str, Any]]:
+        """POST ``payload`` with SSE and yield each ``data:`` JSON event."""
+        request = self._build_request(self.base_url, "/chat/completions", payload)
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:") :].strip()
+                if data == "[DONE]":
+                    break
+                yield json.loads(data)
+
+    @staticmethod
+    def _tool_call_chunks_from_delta(
+        delta: Dict[str, Any],
+    ) -> List[ToolCallChunk]:
+        """Convert an OpenAI streaming ``delta`` into tool-call chunks."""
+        chunks: List[ToolCallChunk] = []
+        for index, call in enumerate(delta.get("tool_calls") or []):
+            function = call.get("function", {})
+            chunks.append(
+                ToolCallChunk(
+                    name=function.get("name") or "",
+                    args=function.get("arguments") or "",
+                    id=call.get("id") or "",
+                    index=call.get("index", index),
+                )
+            )
+        return chunks
+
+    def _stream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """Stream the completion via SSE with the affinity pipeline applied."""
+        payload = self._prepare_request(messages, stop, run_manager, kwargs)
+        payload["stream"] = True
+        for event in self._stream_events(payload):
+            choice = (event.get("choices") or [{}])[0]
+            delta = dict(choice.get("delta") or {})
+            content = delta.get("content") or ""
+            tool_call_chunks = self._tool_call_chunks_from_delta(delta)
+            if not content and not tool_call_chunks:
+                continue
+            if run_manager:
+                run_manager.on_llm_new_token(content or "")
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=content,
+                    tool_call_chunks=tool_call_chunks,
+                )
+            )

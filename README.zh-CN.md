@@ -120,6 +120,20 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 python -m pytest tests/unit_tests
 ```
 
+## 基准测试
+
+面向真实引擎的单变量基准测试位于 [benchmark/](benchmark/)：两个完全相同的
+`deepagents` 投顾智能体跑同一套金融任务集——baseline 用原生 `ChatOpenAI`，
+实验组用 `AscendAffinityChatModel`。度量真实 TTFT（每次 LLM 调用首 token）
+与亲和行为（salt 绑定、部分释放）：
+
+```bash
+python benchmark/run_benchmark.py --setup \
+  --engine-url http://<引擎地址>:<端口>/v1 --model <模型名>
+```
+
+配置与报告解读见 [benchmark/README.zh-CN.md](benchmark/README.zh-CN.md)。
+
 ## 开发
 
 ```bash
