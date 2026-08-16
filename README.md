@@ -119,14 +119,14 @@ ignored by the engine and release failures stay non-fatal warnings.
 
 ## Verification
 
-```bash
-pip install -r example/requirements.txt
-python example/verify_affinity.py
-```
+Real affinity benefit is measured on a real Ascend engine (MindIE /
+vLLM-Ascend prefix-cache stats). Without hardware, the unit tests verify the
+full protocol contract (salt injection, prefix diff, release scheduling and
+transport):
 
-Runs the same two-user schedule with affinity off vs salt-bound against a
-deterministic mock engine — expect warm hits 0→4, exactly 1 partial release,
-avg TTFT ~189.6→96.7 ms, identical answers. See [example/README.md](example/README.md).
+```bash
+python -m pytest tests/unit_tests
+```
 
 ## Development
 

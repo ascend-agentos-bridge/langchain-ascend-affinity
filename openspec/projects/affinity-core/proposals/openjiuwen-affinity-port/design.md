@@ -73,16 +73,3 @@ langchain_ascend/
     chat_ascend.py   # AscendAffinityChatModel
 ```
 
-## 4. Example harness
-
-`example/mock_engine.py` models KV blocks per salt: a request's cache is warm
-when its prefix matches the resident blocks; **rewritten history without a
-release leaves the block table divergent** (next call recomputes the suffix —
-partial-cold penalty), and sustained divergence under slot pressure triggers
-LRU drop (full cold). A `/release_kv_cache` call truncates the stale suffix,
-keeping the prefix resident.
-
-`example/verify_affinity.py` runs the same deterministic 2-phase agent loop
-(plain model vs affinity model) including a mid-session summarize-style
-rewrite, then prints salt binding, release counts, warm/cold TTFT and answer
-consistency.

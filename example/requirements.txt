@@ -1,5 +1,0 @@
-# Extra dependencies for the verification example only (not the library
-# itself). The harness drives AscendAffinityChatModel directly, so it needs
-# no agent framework — just the mock engine's web layer.
-fastapi>=0.110
-uvicorn>=0.29

@@ -37,11 +37,9 @@ LangChain equivalent of agent-core's `InferenceAffinityModelClient` +
 - `PrefixCacheTracker` — the ported `KVCacheManager` scheduling algorithm
   (kept from the interim port, now the only scheduling core).
 - Remove the obsolete machinery: `callbacks/` (hint handler), `backends/`
-  (offload/prefetch/evict adapters), the inline `agent_hint` field.
-- Rewrite `example/` as a lean verification harness: mock engine extended with
-  salt-bound KV blocks + stale-suffix accounting, and a script that runs an
-  agent loop with mid-session history rewriting to show salt binding, release
-  firing and warm-TTFT preservation — no NPU required.
+  (offload/prefetch/evict adapters), the inline `agent_hint` field, and the
+  hardware-free mock example (simulated TTFT numbers prove nothing; protocol
+  behavior is covered by the unit-test contract suites).
 - Rewrite the bilingual root README Quick Start on **LangChain 1.x**, with
   three copy-paste recipes: `langchain` (`create_agent`), `langgraph`
   (`StateGraph` + `create_react_agent`), and `deepagents`
@@ -50,11 +48,9 @@ LangChain equivalent of agent-core's `InferenceAffinityModelClient` +
 ## Impact
 
 - **Removed**: `langchain_ascend/callbacks/`, `langchain_ascend/backends/`,
-  `AscendChatLLM` (superseded by `AscendAffinityChatModel`),
-  example `agents.py` / `run_benchmark.py` (superseded by the harness),
-  old benchmark reports stay ignored.
-- **Added**: `AscendAffinityChatModel`, rewritten tests, `example/verify_affinity.py`,
-  updated mock engine semantics.
+  `AscendChatLLM` (superseded by `AscendAffinityChatModel`), and the whole
+  `example/` directory (mock engine + benchmark + verification harness).
+- **Added**: `AscendAffinityChatModel`, rewritten contract test suites.
 - **Breaking** for v0.1 users: callback handler and backend exports disappear;
   the model class replaces `AscendChatLLM` (same constructor shape plus
   affinity defaults).

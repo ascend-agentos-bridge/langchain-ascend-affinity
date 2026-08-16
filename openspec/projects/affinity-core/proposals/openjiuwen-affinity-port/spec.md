@@ -6,9 +6,9 @@ Replace the home-grown Agent-Hint mechanism (callback handler + backend
 adapters + `/agent-hints` channel) with a complete port of openJiuwen
 agent-core's compute-affinity mechanism: request-inline `cache_salt` binding,
 client-side prefix-diff scheduling, and partial KV release. Introduce
-`AscendAffinityChatModel` as the single entry point, rewrite the example as a
-lean verification harness, and rewrite the bilingual README Quick Start on
-LangChain 1.x with `langchain` / `langgraph` / `deepagents` recipes.
+`AscendAffinityChatModel` as the single entry point and rewrite the bilingual
+README Quick Start on LangChain 1.x with `langchain` / `langgraph` /
+`deepagents` recipes.
 
 ## Purpose
 
@@ -73,21 +73,7 @@ window is updated regardless of release outcome.
 - [ ] Engine down/unreachable → generation still succeeds, warning logged.
 - [ ] Async path (`ainvoke`) applies the identical affinity pipeline.
 
-### REQ-5: Example verification harness
-
-**Requirement:** `example/` MUST contain: `mock_engine.py` (OpenAI-compatible
-chat + salt-bound KV-block simulation + `/release_kv_cache` + `/metrics`),
-`verify_affinity.py` (two-phase deterministic loop with mid-session history
-rewrite), bilingual READMEs, requirements.txt. It MUST run without NPU and
-demonstrate: salt binding, release firing on rewrite, warm-TTFT preservation
-vs the plain baseline.
-
-**Acceptance Criteria:**
-- [ ] `python example/verify_affinity.py` exits 0 and prints the comparison.
-- [ ] Affinity phase shows ≥1 release; baseline shows 0.
-- [ ] Both phases produce identical answers (determinism check).
-
-### REQ-6: README Quick Start on LangChain 1.x (three frameworks)
+### REQ-5: README Quick Start on LangChain 1.x (three frameworks)
 
 **Requirement:** Both READMEs MUST ship a Quick Start with three runnable
 recipes using `AscendAffinityChatModel` as the model:
@@ -101,7 +87,7 @@ removed hint protocol.
 - [ ] Three recipes present in both languages, top language-switch line kept.
 - [ ] No references to `AscendAffinityCallbackHandler` / `/agent-hints` remain.
 
-### REQ-7: Quality gates
+### REQ-6: Quality gates
 
 **Requirement:** `python scripts/quality_gate.py` MUST pass: pylint 10.00/10
 over all tracked files, unit tests green, coverage ≥ 90%.

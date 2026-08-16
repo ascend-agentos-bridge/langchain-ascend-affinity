@@ -113,14 +113,12 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 
 ## 验证
 
-```bash
-pip install -r example/requirements.txt
-python example/verify_affinity.py
-```
+真实亲和收益需在真实昇腾引擎上度量（MindIE / vLLM-Ascend 前缀缓存统计）。
+无硬件环境下，单元测试覆盖完整协议契约（salt 注入、前缀差异、释放调度与传输）：
 
-对确定性模拟引擎分别以“关闭亲和”和“salt 绑定”跑同一套双用户调度——预期
-热命中 0→4、精确 1 次部分释放、平均 TTFT 约 189.6→96.7 ms、答案完全一致。
-详见 [example/README.zh-CN.md](example/README.zh-CN.md)。
+```bash
+python -m pytest tests/unit_tests
+```
 
 ## 开发
 

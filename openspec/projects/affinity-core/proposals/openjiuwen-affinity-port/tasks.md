@@ -11,11 +11,13 @@
 - [x] T4. Rewrite unit tests: tracker suite (kept), model request-contract
       suite (REQ-2), scheduling-fidelity suite (REQ-3), release-transport
       suite (REQ-4, incl. async + failure paths).
-- [x] T5. Rework `example/mock_engine.py` to salt-bound KV-block semantics
-      with stale-suffix accounting; delete `agents.py` / `run_benchmark.py` /
-      old task set; write `verify_affinity.py` per REQ-5.
-- [x] T6. Rewrite root READMEs (EN + zh-CN) per REQ-6: three-framework Quick
+- [x] T5. Rewrite root READMEs (EN + zh-CN) per REQ-5: three-framework Quick
       Start, mechanism section, installation; keep bilingual sync and
       language-switch line.
-- [x] T7. Run `python scripts/quality_gate.py` until pylint 10.00 + coverage
-      ≥ 90%; smoke-run `python example/verify_affinity.py`.
+- [x] T6. Run `python scripts/quality_gate.py` until pylint 10.00 + coverage
+      ≥ 90%.
+
+> Amendment (2026-08-16): the `example/` directory (mock engine +
+> verification harness) was removed after review — simulated TTFT numbers
+> are self-fulfilling and add nothing over the unit-test contract suites.
+> Real benefit is measured on real Ascend engines only.

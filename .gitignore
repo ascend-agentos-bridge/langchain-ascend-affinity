@@ -30,6 +30,3 @@ Thumbs.db
 *.pem
 .env
 .env.*
-
-# Benchmark example outputs
-example/reports/
