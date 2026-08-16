@@ -28,7 +28,8 @@ export ASCEND_MODEL=<模型名>
 python benchmark/run_benchmark.py
 ```
 
-可选项：`--max-parallel`（任务并发数，默认 2）、`--turn-timeout`（单轮
+可选项：`--api-key`（兜底 `ASCEND_API_KEY` 环境变量，本地无鉴权引擎默认
+`EMPTY`）、`--max-parallel`（任务并发数，默认 2）、`--turn-timeout`（单轮
 超时秒数，默认 240）、`--report-dir`（报告目录）。
 
 ## 度量什么

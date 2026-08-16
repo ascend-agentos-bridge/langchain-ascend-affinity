@@ -30,7 +30,8 @@ export ASCEND_MODEL=<model-name>
 python benchmark/run_benchmark.py
 ```
 
-Options: `--max-parallel` (concurrent tasks, default 2),
+Options: `--api-key` (falls back to `ASCEND_API_KEY`, default `EMPTY` for
+local no-auth engines), `--max-parallel` (concurrent tasks, default 2),
 `--turn-timeout` (seconds, default 240), `--report-dir`.
 
 ## What it measures
