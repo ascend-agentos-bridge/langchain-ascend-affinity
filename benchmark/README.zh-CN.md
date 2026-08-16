@@ -17,7 +17,8 @@
 # 一键：安装基准依赖 + 引擎探测 + 跑双智能体 + 出报告
 python benchmark/run_benchmark.py --setup \
   --engine-url http://<引擎地址>:<端口>/v1 \
-  --model <模型名>
+  --model <模型名> \
+  --api-key <API密钥>
 ```
 
 或使用环境变量：
@@ -25,6 +26,7 @@ python benchmark/run_benchmark.py --setup \
 ```bash
 export ASCEND_ENGINE_URL=http://<引擎地址>:<端口>/v1
 export ASCEND_MODEL=<模型名>
+export ASCEND_API_KEY=<API密钥>
 python benchmark/run_benchmark.py
 ```
 

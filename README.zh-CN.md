@@ -129,7 +129,8 @@ python -m pytest tests/unit_tests
 
 ```bash
 python benchmark/run_benchmark.py --setup \
-  --engine-url http://<引擎地址>:<端口>/v1 --model <模型名>
+  --engine-url http://<引擎地址>:<端口>/v1 --model <模型名> \
+  --api-key <API密钥>
 ```
 
 配置与报告解读见 [benchmark/README.zh-CN.md](benchmark/README.zh-CN.md)。

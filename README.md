@@ -138,7 +138,8 @@ and affinity behaviour (salt binding, partial releases):
 
 ```bash
 python benchmark/run_benchmark.py --setup \
-  --engine-url http://<engine-host>:<port>/v1 --model <model-name>
+  --engine-url http://<engine-host>:<port>/v1 --model <model-name> \
+  --api-key <api-key>
 ```
 
 See [benchmark/README.md](benchmark/README.md) for configuration and how to

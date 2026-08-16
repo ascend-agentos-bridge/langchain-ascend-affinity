@@ -19,7 +19,8 @@ The only variable is the chat model object.
 # one-click: install benchmark deps + probe + run both agents + report
 python benchmark/run_benchmark.py --setup \
   --engine-url http://<engine-host>:<port>/v1 \
-  --model <model-name>
+  --model <model-name> \
+  --api-key <api-key>
 ```
 
 Or use environment variables:
@@ -27,6 +28,7 @@ Or use environment variables:
 ```bash
 export ASCEND_ENGINE_URL=http://<engine-host>:<port>/v1
 export ASCEND_MODEL=<model-name>
+export ASCEND_API_KEY=<api-key>
 python benchmark/run_benchmark.py
 ```
 
