@@ -80,8 +80,8 @@ class TestManagementMethods:
         post = _patch_post(model, mocker)
         assert model.evict_kvc(session_id="s1") is True
         root, path, payload = post.call_args[0]
-        assert root == "http://engine.test/v1"
-        assert path == "/chat/completions"
+        assert root == "http://engine.test/v1/chat/completions"
+        assert path == ""
         assert payload["messages"] == []
         hint = payload["agent_hint"]
         assert hint["session_id"] == "s1"

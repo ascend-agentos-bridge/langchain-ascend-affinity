@@ -226,14 +226,19 @@ class AscendAffinityChatModel(BaseChatModel):
     def _build_request(
         self, root: str, path: str, payload: Dict[str, Any]
     ) -> urllib.request.Request:
-        """Build the JSON POST request for ``root + path``."""
+        """Build the JSON POST request for ``root + path``.
+
+        Authentication is optional (agent-core parity): the ``Authorization``
+        header is sent only when ``api_key`` is non-empty, so anonymous
+        engines can be reached with ``api_key=""``.
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         return urllib.request.Request(
             f"{root.rstrip('/')}{path}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            headers=headers,
             method="POST",
         )
 
@@ -243,10 +248,31 @@ class AscendAffinityChatModel(BaseChatModel):
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def _engine_root(self) -> str:
-        """Engine root URL (``base_url`` without the OpenAI ``/v1`` suffix)."""
+    def _chat_completions_url(self) -> str:
+        """Chat-completions URL for origin, ``/v1`` base, or full endpoint.
+
+        Mirrors agent-core ``AscendAffinityModelClient._chat_completions_url``
+        (2026-08 vLLM joint-debugging fix).
+        """
         base = self.base_url.rstrip("/")
-        return base[: -len("/v1")] if base.endswith("/v1") else base
+        if base.endswith("/chat/completions"):
+            return base
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    def _engine_root(self) -> str:
+        """Engine root URL (``base_url`` without ``/v1`` / ``/chat/completions``)."""
+        base = self.base_url.rstrip("/")
+        if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]
+        if base.endswith("/v1"):
+            return base[: -len("/v1")]
+        return base
+
+    def supports_kv_cache_affinity(self) -> bool:
+        """Capability flag consumed by lifecycle schedulers (agent-core parity)."""
+        return self.enable_agent_hint
 
     # -- affinity pipeline -------------------------------------------------------
 
@@ -498,7 +524,7 @@ class AscendAffinityChatModel(BaseChatModel):
         }
         self._affinity_stats["management_requests"] += 1
         try:
-            self._post(self.base_url, "/chat/completions", payload)
+            self._post(self._chat_completions_url(), "", payload)
         except OSError as exc:
             self._affinity_stats["management_failed"] += 1
             logger.warning(
@@ -642,7 +668,7 @@ class AscendAffinityChatModel(BaseChatModel):
     ) -> ChatResult:
         """Shared sync/async pipeline: affinity injection + one HTTP request."""
         payload = self._prepare_request(messages, stop, run_manager, kwargs)
-        response = self._post(self.base_url, "/chat/completions", payload)
+        response = self._post(self._chat_completions_url(), "", payload)
         return self._parse_chat_result(response)
 
     def _generate_from_stream(
@@ -690,7 +716,7 @@ class AscendAffinityChatModel(BaseChatModel):
         self, payload: Dict[str, Any]
     ) -> Iterator[Dict[str, Any]]:
         """POST ``payload`` with SSE and yield each ``data:`` JSON event."""
-        request = self._build_request(self.base_url, "/chat/completions", payload)
+        request = self._build_request(self._chat_completions_url(), "", payload)
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
