@@ -115,6 +115,7 @@ partial release, keeping the valid prefix cache-resident.
 | `enable_affinity` | `True` | `False` = plain OpenAI-compatible client |
 | `release_endpoint` | `/release_kv_cache` | partial-release path; `""` disables |
 | `enable_agent_hint` | `False` | opt-in agent_hint lifecycle protocol (see below) |
+| `idle_evict_after_seconds` | `0.0` | auto-evict the session KV cache after this many idle seconds (0 = off; requires `enable_agent_hint`) |
 | `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | standard request options |
 
 Session resolution per call: per-call / `bind(session_id=...)` kwargs → run
@@ -187,10 +188,15 @@ checked against its affinity commits on every maintenance pass.
 | Protocol | What the client sends | Status in this library |
 |---|---|---|
 | **release** (default) | `cache_sharing: true` + `cache_salt: <session_id>` on every bound request; on rewritten history `POST {engine-root}/release_kv_cache` with `model` / `cache_salt` / `cache_sharing` / `messages` / `messages_released_index` (+ `tools` / `tools_released_index`) | byte-compatible with agent-core `InferenceAffinityModelClient.release()`; prefix-diff scheduling is automatic |
-| **agent_hint lifecycle** (stage A, opt-in) | `agent_hint: {session_id, parent_session_id}` identity on chat requests; `evict_kvc` / `offload_kvc` / `prefetch_kvc` management methods send `context_management: {manage_request: true, edits: [{type, target, start, end}]}` | field-for-field with agent-core `AscendAffinityModelClient` (2026-07 `63380f17e8`); management actions default **off** (`enable_agent_hint=True` to enable) |
+| **agent_hint lifecycle** (stage A, opt-in) | `agent_hint: {session_id, parent_session_id}` identity on chat requests; `evict_kvc` / `offload_kvc` / `prefetch_kvc` management methods send `context_management: {manage_request: true, edits: [{type, target, start, end}]}`; inference-then-manage via per-call `agent_hint_manage={...}` (`manage_request: false`); idle auto-evict via `idle_evict_after_seconds` | field-for-field with agent-core `AscendAffinityModelClient` (2026-07 `63380f17e8`, vLLM-fix `75adc2b44e`); management actions default **off** (`enable_agent_hint=True` to enable) |
 
 Both degrade safely: engines that ignore unknown fields treat the request as
 a plain OpenAI call, and management failures are logged/counted, never fatal.
+
+`base_url` accepts an origin (`http://host:8000`), a `/v1` base
+(`http://host:8000/v1`), or a full `/chat/completions` endpoint; the
+release endpoint resolves on the engine root (origin without `/v1`).
+Authentication is optional: set `api_key=""` for anonymous engines.
 The newer lifecycle protocol is introduced in stages — identity + explicit
 management first, model-internal auto-scheduling only after real-engine
 evidence (see `benchmark/PRINCIPLES.md` for the evidence discipline).

@@ -185,8 +185,11 @@ class TestReleaseTransport:
         post = _patch_post(chat_llm, mocker)
         chat_llm.invoke([HumanMessage(content="hi"), AIMessage(content="old")])
         chat_llm.invoke([HumanMessage(content="hi"), AIMessage(content="new")])
-        paths = [call[0][1] for call in post.call_args_list]
-        assert paths == ["/chat/completions", "/chat/completions"]
+        roots = [call[0][0] for call in post.call_args_list]
+        assert roots == [
+            "http://engine.test/v1/chat/completions",
+            "http://engine.test/v1/chat/completions",
+        ]
 
     async def test_agenerate_applies_affinity(self, chat_llm, mocker):
         post = _patch_post(chat_llm, mocker)

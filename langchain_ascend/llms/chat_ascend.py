@@ -26,6 +26,12 @@ Stage A (2026-08) additionally supports the openjiuwen agent-core
 agent-core's ``AscendAffinityModelClient`` field-for-field. Engines that
 ignore unknown fields degrade safely.
 
+Inference-then-manage (agent-core 75adc2b44e parity): pass
+``agent_hint_manage={"action": ..., "target": ..., "start": ..., "end": ...}``
+per invoke to carry ``context_management.manage_request=false`` edits on a
+normal inference request, so the engine applies the edit after generation
+atomically (e.g. evicting an ephemeral attachment tail).
+
 Session resolution order per call: per-call / ``bind(session_id=...)`` kwargs
 → best-effort ``run_manager.metadata`` → constructor ``session_id``.
 """
@@ -36,6 +42,7 @@ import asyncio
 import functools
 import json
 import logging
+import threading
 import urllib.error
 import urllib.request
 from typing import Any, Dict, Iterator, List, Optional, Sequence
@@ -163,6 +170,13 @@ class AscendAffinityChatModel(BaseChatModel):
         "methods become available. Engines that ignore unknown fields "
         "degrade safely.",
     )
+    idle_evict_after_seconds: float = Field(
+        default=0.0,
+        description="Auto-evict the session's KV cache after this many "
+        "seconds of inactivity following a generation (0 = disabled). "
+        "Requires enable_agent_hint; each new call cancels and re-arms the "
+        "timer.",
+    )
     streaming: bool = Field(
         default=False,
         description="When True, invoke()/ainvoke() stream via SSE internally "
@@ -172,6 +186,8 @@ class AscendAffinityChatModel(BaseChatModel):
 
     _prefix_tracker: PrefixCacheTracker = PrivateAttr(default_factory=PrefixCacheTracker)
     _affinity_stats: Dict[str, int] = PrivateAttr(default_factory=_new_affinity_stats)
+    _idle_timer: Optional[threading.Timer] = PrivateAttr(default=None)
+    _idle_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     @property
     def _llm_type(self) -> str:
@@ -226,14 +242,19 @@ class AscendAffinityChatModel(BaseChatModel):
     def _build_request(
         self, root: str, path: str, payload: Dict[str, Any]
     ) -> urllib.request.Request:
-        """Build the JSON POST request for ``root + path``."""
+        """Build the JSON POST request for ``root + path``.
+
+        Authentication is optional (agent-core parity): the ``Authorization``
+        header is sent only when ``api_key`` is non-empty, so anonymous
+        engines can be reached with ``api_key=""``.
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         return urllib.request.Request(
             f"{root.rstrip('/')}{path}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            headers=headers,
             method="POST",
         )
 
@@ -243,10 +264,31 @@ class AscendAffinityChatModel(BaseChatModel):
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def _engine_root(self) -> str:
-        """Engine root URL (``base_url`` without the OpenAI ``/v1`` suffix)."""
+    def _chat_completions_url(self) -> str:
+        """Chat-completions URL for origin, ``/v1`` base, or full endpoint.
+
+        Mirrors agent-core ``AscendAffinityModelClient._chat_completions_url``
+        (2026-08 vLLM joint-debugging fix).
+        """
         base = self.base_url.rstrip("/")
-        return base[: -len("/v1")] if base.endswith("/v1") else base
+        if base.endswith("/chat/completions"):
+            return base
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    def _engine_root(self) -> str:
+        """Engine root URL (``base_url`` without ``/v1`` / ``/chat/completions``)."""
+        base = self.base_url.rstrip("/")
+        if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]
+        if base.endswith("/v1"):
+            return base[: -len("/v1")]
+        return base
+
+    def supports_kv_cache_affinity(self) -> bool:
+        """Capability flag consumed by lifecycle schedulers (agent-core parity)."""
+        return self.enable_agent_hint
 
     # -- affinity pipeline -------------------------------------------------------
 
@@ -278,6 +320,7 @@ class AscendAffinityChatModel(BaseChatModel):
         message_dicts: List[Dict[str, Any]],
         tools: Optional[Sequence[Dict[str, Any]]],
         payload: Dict[str, Any],
+        manage: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Salt-bind the request and release stale KV blocks when enabled."""
         if not self.enable_affinity:
@@ -292,10 +335,20 @@ class AscendAffinityChatModel(BaseChatModel):
         payload["cache_sharing"] = True
         payload["cache_salt"] = session_id
         if self.enable_agent_hint:
-            payload["agent_hint"] = {
-                "session_id": session_id,
-                "parent_session_id": parent_session_id or session_id,
-            }
+            payload["agent_hint"] = self._build_agent_hint(
+                session_id=session_id,
+                parent_session_id=parent_session_id or session_id,
+                action=manage.get("action", "evict") if manage else None,
+                target=manage.get("target", "messages") if manage else "session",
+                manage_request=False if manage else None,
+                msg_start=manage.get("start") if manage else None,
+                msg_end=manage.get("end") if manage else None,
+                tools_start=manage.get("tools_start") if manage else None,
+                tools_end=manage.get("tools_end") if manage else None,
+                include_tools=bool(manage.get("include_tools", False))
+                if manage
+                else False,
+            )
         if not self.release_endpoint:
             self._prefix_tracker.update(session_id, message_dicts, tools)
             return
@@ -498,7 +551,7 @@ class AscendAffinityChatModel(BaseChatModel):
         }
         self._affinity_stats["management_requests"] += 1
         try:
-            self._post(self.base_url, "/chat/completions", payload)
+            self._post(self._chat_completions_url(), "", payload)
         except OSError as exc:
             self._affinity_stats["management_failed"] += 1
             logger.warning(
@@ -560,6 +613,42 @@ class AscendAffinityChatModel(BaseChatModel):
             target=target,
             **kwargs,
         )
+
+    # -- idle auto-evict -------------------------------------------------------------
+
+    def _cancel_idle_evict_locked(self) -> None:
+        """Cancel the pending idle timer (caller holds the lock)."""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _cancel_idle_evict(self) -> None:
+        """Cancel any pending idle-evict timer (safe when disabled)."""
+        with self._idle_lock:
+            self._cancel_idle_evict_locked()
+
+    def _schedule_idle_evict(self, session_id: Optional[str]) -> None:
+        """Arm the idle-evict timer after a generation, if configured."""
+        if not self.idle_evict_after_seconds or not session_id:
+            return
+        if not self.enable_agent_hint:
+            return
+        with self._idle_lock:
+            self._cancel_idle_evict_locked()
+            timer = threading.Timer(
+                self.idle_evict_after_seconds,
+                self._idle_evict_cb,
+                args=(session_id,),
+            )
+            timer.daemon = True
+            self._idle_timer = timer
+            timer.start()
+
+    def _idle_evict_cb(self, session_id: str) -> None:
+        """Timer callback: best-effort session evict (never raises)."""
+        with self._idle_lock:
+            self._idle_timer = None
+        self.evict_kvc(session_id=session_id)
 
     # -- response parsing ----------------------------------------------------------
 
@@ -623,6 +712,7 @@ class AscendAffinityChatModel(BaseChatModel):
         session_id = self._resolve_session_id(run_manager, kwargs)
         parent_session_id = self._resolve_parent_session_id(run_manager, kwargs)
         tools = kwargs.get("tools")
+        manage = kwargs.get("agent_hint_manage")
         payload = self._build_payload(messages, stop, tools)
         self._apply_affinity(
             session_id=session_id,
@@ -630,6 +720,7 @@ class AscendAffinityChatModel(BaseChatModel):
             message_dicts=payload["messages"],
             tools=tools,
             payload=payload,
+            manage=manage if isinstance(manage, dict) else None,
         )
         return payload
 
@@ -642,7 +733,7 @@ class AscendAffinityChatModel(BaseChatModel):
     ) -> ChatResult:
         """Shared sync/async pipeline: affinity injection + one HTTP request."""
         payload = self._prepare_request(messages, stop, run_manager, kwargs)
-        response = self._post(self.base_url, "/chat/completions", payload)
+        response = self._post(self._chat_completions_url(), "", payload)
         return self._parse_chat_result(response)
 
     def _generate_from_stream(
@@ -669,9 +760,14 @@ class AscendAffinityChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        session_id = self._resolve_session_id(run_manager, kwargs)
+        self._cancel_idle_evict()
         if self.streaming:
-            return self._generate_from_stream(messages, stop, run_manager, kwargs)
-        return self._request(messages, stop, run_manager, kwargs)
+            result = self._generate_from_stream(messages, stop, run_manager, kwargs)
+        else:
+            result = self._request(messages, stop, run_manager, kwargs)
+        self._schedule_idle_evict(session_id)
+        return result
 
     async def _agenerate(
         self,
@@ -690,7 +786,7 @@ class AscendAffinityChatModel(BaseChatModel):
         self, payload: Dict[str, Any]
     ) -> Iterator[Dict[str, Any]]:
         """POST ``payload`` with SSE and yield each ``data:`` JSON event."""
-        request = self._build_request(self.base_url, "/chat/completions", payload)
+        request = self._build_request(self._chat_completions_url(), "", payload)
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
