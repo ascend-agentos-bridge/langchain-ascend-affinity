@@ -357,6 +357,8 @@ class TestAffinityStats:
             "salt_bound_requests": 2,
             "releases_attempted": 1,
             "releases_failed": 1,
+            "management_requests": 0,
+            "management_failed": 0,
         }
 
     def test_stats_property_returns_copy(self, chat_llm, mocker):
@@ -375,6 +377,8 @@ class TestAffinityStats:
             "salt_bound_requests": 0,
             "releases_attempted": 0,
             "releases_failed": 0,
+            "management_requests": 0,
+            "management_failed": 0,
         }
 
 

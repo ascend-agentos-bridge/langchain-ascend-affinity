@@ -18,6 +18,14 @@ Per generation request this model does exactly what agent-core's
    only the stale KV blocks while keeping the valid prefix. Release failures
    are logged and never abort generation.
 
+Stage A (2026-08) additionally supports the openjiuwen agent-core
+``agent_hint`` lifecycle protocol (``session_id`` / ``parent_session_id`` +
+``context_management`` ``evict/offload/prefetch``), opt-in via
+``enable_agent_hint``: requests carry the identity fields, and the
+``evict_kvc`` / ``offload_kvc`` / ``prefetch_kvc`` management methods match
+agent-core's ``AscendAffinityModelClient`` field-for-field. Engines that
+ignore unknown fields degrade safely.
+
 Session resolution order per call: per-call / ``bind(session_id=...)`` kwargs
 → best-effort ``run_manager.metadata`` → constructor ``session_id``.
 """
@@ -53,6 +61,9 @@ logger = logging.getLogger(__name__)
 
 _SESSION_KEYS = ("session_id", "session", "conversation_id")
 
+_AGENT_HINT_ACTIONS = ("evict", "offload", "prefetch")
+_AGENT_HINT_TARGETS = ("session", "messages", "tools")
+
 _ROLE_BY_TYPE = {
     "human": "user",
     "ai": "assistant",
@@ -69,6 +80,8 @@ def _new_affinity_stats() -> Dict[str, int]:
         "salt_bound_requests": 0,
         "releases_attempted": 0,
         "releases_failed": 0,
+        "management_requests": 0,
+        "management_failed": 0,
     }
 
 
@@ -142,6 +155,14 @@ class AscendAffinityChatModel(BaseChatModel):
         description="Partial KV-Cache release path on the engine "
         "(agent-core compatible). Empty string disables release requests.",
     )
+    enable_agent_hint: bool = Field(
+        default=False,
+        description="Opt-in to the openjiuwen agent-core agent_hint "
+        "lifecycle protocol: requests carry session_id/parent_session_id "
+        "identity, and evict_kvc/offload_kvc/prefetch_kvc management "
+        "methods become available. Engines that ignore unknown fields "
+        "degrade safely.",
+    )
     streaming: bool = Field(
         default=False,
         description="When True, invoke()/ainvoke() stream via SSE internally "
@@ -186,6 +207,19 @@ class AscendAffinityChatModel(BaseChatModel):
             if value:
                 return str(value)
         return self.session_id
+
+    @staticmethod
+    def _resolve_parent_session_id(
+        run_manager: Optional[CallbackManagerForLLMRun],
+        kwargs: Dict[str, Any],
+    ) -> Optional[str]:
+        """Parent session id (agent_hint lineage); defaults to the session id."""
+        value = kwargs.get("parent_session_id")
+        if value:
+            return str(value)
+        metadata = getattr(run_manager, "metadata", None) or {}
+        value = metadata.get("parent_session_id")
+        return str(value) if value else None
 
     # -- transport -------------------------------------------------------------
 
@@ -238,7 +272,9 @@ class AscendAffinityChatModel(BaseChatModel):
 
     def _apply_affinity(
         self,
+        *,
         session_id: Optional[str],
+        parent_session_id: Optional[str],
         message_dicts: List[Dict[str, Any]],
         tools: Optional[Sequence[Dict[str, Any]]],
         payload: Dict[str, Any],
@@ -255,6 +291,11 @@ class AscendAffinityChatModel(BaseChatModel):
         self._affinity_stats["salt_bound_requests"] += 1
         payload["cache_sharing"] = True
         payload["cache_salt"] = session_id
+        if self.enable_agent_hint:
+            payload["agent_hint"] = {
+                "session_id": session_id,
+                "parent_session_id": parent_session_id or session_id,
+            }
         if not self.release_endpoint:
             self._prefix_tracker.update(session_id, message_dicts, tools)
             return
@@ -279,6 +320,246 @@ class AscendAffinityChatModel(BaseChatModel):
                     "KV release request failed for session %s: %s", session_id, exc
                 )
         self._prefix_tracker.update(session_id, message_dicts, tools)
+
+
+    # -- agent_hint lifecycle (openjiuwen agent-core AscendAffinity protocol) --
+
+    @staticmethod
+    def _validate_action_target(action: str, target: str) -> None:
+        """Reject unknown lifecycle actions/targets (agent-core parity)."""
+        if action not in _AGENT_HINT_ACTIONS:
+            raise ValueError(f"unknown agent_hint action: {action}")
+        if target not in _AGENT_HINT_TARGETS:
+            raise ValueError(f"unknown agent_hint target: {target}")
+
+    @staticmethod
+    def _range_edit(
+        action: str, target: str, start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        """Half-open range edit; ``start < end`` required (agent-core parity)."""
+        if start is None or end is None:
+            raise ValueError(f"target={target} requires start and end")
+        if start >= end:
+            raise ValueError(f"target={target} half-open range requires start < end")
+        return {"type": action, "target": target, "start": start, "end": end}
+
+    @staticmethod
+    def _has_any_range(**ranges: Optional[int]) -> bool:
+        return any(value is not None for value in ranges.values())
+
+    @classmethod
+    def _build_target_edits(  # pylint: disable=too-many-arguments  # agent-core parity
+        cls,
+        *,
+        action: str,
+        target: str,
+        msg_start: Optional[int] = None,
+        msg_end: Optional[int] = None,
+        tools_start: Optional[int] = None,
+        tools_end: Optional[int] = None,
+        include_tools: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Build context-management edits for one protocol target."""
+        cls._validate_action_target(action, target)
+
+        if target == "session":
+            if cls._has_any_range(
+                msg_start=msg_start,
+                msg_end=msg_end,
+                tools_start=tools_start,
+                tools_end=tools_end,
+            ):
+                raise ValueError("target=session does not accept message/tool ranges")
+            if include_tools:
+                raise ValueError("target=session does not accept include_tools=True")
+            return [{"type": action, "target": "session"}]
+
+        if target == "messages":
+            edits = [
+                cls._range_edit(
+                    action=action, target="messages", start=msg_start, end=msg_end
+                )
+            ]
+            if include_tools:
+                edits.append(
+                    cls._range_edit(
+                        action=action, target="tools", start=tools_start, end=tools_end
+                    )
+                )
+            elif cls._has_any_range(tools_start=tools_start, tools_end=tools_end):
+                raise ValueError(
+                    "tools range requires include_tools=True or target=tools"
+                )
+            return edits
+
+        if include_tools:
+            raise ValueError("target=tools should not also set include_tools=True")
+        if cls._has_any_range(msg_start=msg_start, msg_end=msg_end):
+            raise ValueError("messages range is invalid for target=tools")
+        return [
+            cls._range_edit(
+                action=action, target="tools", start=tools_start, end=tools_end
+            )
+        ]
+
+    @classmethod
+    def _build_agent_hint(  # pylint: disable=too-many-arguments  # agent-core parity
+        cls,
+        *,
+        session_id: str,
+        parent_session_id: str,
+        action: Optional[str] = None,
+        target: str = "session",
+        manage_request: Optional[bool] = None,
+        msg_start: Optional[int] = None,
+        msg_end: Optional[int] = None,
+        tools_start: Optional[int] = None,
+        tools_end: Optional[int] = None,
+        include_tools: bool = False,
+    ) -> Dict[str, Any]:
+        """Build the agent_hint extension (agent-core field-for-field)."""
+        hint: Dict[str, Any] = {
+            "session_id": session_id,
+            "parent_session_id": parent_session_id,
+        }
+        if action is None:
+            return hint
+        if not isinstance(manage_request, bool):
+            raise ValueError("manage_request must be set when action is given")
+        hint["context_management"] = {
+            "manage_request": manage_request,
+            "edits": cls._build_target_edits(
+                action=action,
+                target=target,
+                msg_start=msg_start,
+                msg_end=msg_end,
+                tools_start=tools_start,
+                tools_end=tools_end,
+                include_tools=include_tools,
+            ),
+        }
+        return hint
+
+    def _manage_kvc(  # pylint: disable=too-many-arguments  # agent-core parity
+        self,
+        action: str,
+        *,
+        session_id: Optional[str] = None,
+        parent_session_id: Optional[str] = None,
+        target: str = "session",
+        messages: Optional[Sequence[BaseMessage]] = None,
+        msg_start: Optional[int] = None,
+        msg_end: Optional[int] = None,
+        tools_start: Optional[int] = None,
+        tools_end: Optional[int] = None,
+        include_tools: bool = False,
+    ) -> bool:
+        """One pure KV-cache management request; never raises on transport.
+
+        Management requests are protocol peers of ``invoke`` and share the
+        chat-completions endpoint with an ``agent_hint.context_management``
+        block (agent-core ``AscendAffinityModelClient._manage_kvc`` parity).
+        Failures are logged and counted, never fatal.
+        """
+        if not self.enable_agent_hint:
+            logger.warning(
+                "agent_hint disabled; ignoring %s_kvc for session %s",
+                action,
+                session_id,
+            )
+            return False
+        self._validate_action_target(action, target)
+        if not session_id:
+            logger.warning("agent_hint %s requires session_id", action)
+            return False
+        if target != "session" and not messages:
+            raise ValueError(f"messages is required for target={target}")
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": (
+                []
+                if target == "session"
+                else [_serialize_message(message) for message in messages or []]
+            ),
+            "stream": False,
+            "agent_hint": self._build_agent_hint(
+                session_id=session_id,
+                parent_session_id=parent_session_id or session_id,
+                action=action,
+                target=target,
+                manage_request=True,
+                msg_start=msg_start,
+                msg_end=msg_end,
+                tools_start=tools_start,
+                tools_end=tools_end,
+                include_tools=include_tools,
+            ),
+        }
+        self._affinity_stats["management_requests"] += 1
+        try:
+            self._post(self.base_url, "/chat/completions", payload)
+        except OSError as exc:
+            self._affinity_stats["management_failed"] += 1
+            logger.warning(
+                "agent_hint %s request failed for session %s: %s",
+                action,
+                session_id,
+                exc,
+            )
+            return False
+        return True
+
+    def evict_kvc(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        parent_session_id: Optional[str] = None,
+        target: str = "session",
+        **kwargs: Any,
+    ) -> bool:
+        """Evict the session's KV cache (agent-core ``evict_kvc`` parity)."""
+        return self._manage_kvc(
+            "evict",
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            target=target,
+            **kwargs,
+        )
+
+    def offload_kvc(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        parent_session_id: Optional[str] = None,
+        target: str = "session",
+        **kwargs: Any,
+    ) -> bool:
+        """Offload the session's KV cache (agent-core ``offload_kvc`` parity)."""
+        return self._manage_kvc(
+            "offload",
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            target=target,
+            **kwargs,
+        )
+
+    def prefetch_kvc(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        parent_session_id: Optional[str] = None,
+        target: str = "session",
+        **kwargs: Any,
+    ) -> bool:
+        """Prefetch the session's KV cache (agent-core ``prefetch_kvc`` parity)."""
+        return self._manage_kvc(
+            "prefetch",
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            target=target,
+            **kwargs,
+        )
 
     # -- response parsing ----------------------------------------------------------
 
@@ -340,9 +621,16 @@ class AscendAffinityChatModel(BaseChatModel):
     ) -> Dict[str, Any]:
         """Shared prologue: session resolution + payload + affinity pipeline."""
         session_id = self._resolve_session_id(run_manager, kwargs)
+        parent_session_id = self._resolve_parent_session_id(run_manager, kwargs)
         tools = kwargs.get("tools")
         payload = self._build_payload(messages, stop, tools)
-        self._apply_affinity(session_id, payload["messages"], tools, payload)
+        self._apply_affinity(
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            message_dicts=payload["messages"],
+            tools=tools,
+            payload=payload,
+        )
         return payload
 
     def _request(
