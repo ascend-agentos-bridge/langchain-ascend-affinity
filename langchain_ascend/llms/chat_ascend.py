@@ -26,6 +26,12 @@ Stage A (2026-08) additionally supports the openjiuwen agent-core
 agent-core's ``AscendAffinityModelClient`` field-for-field. Engines that
 ignore unknown fields degrade safely.
 
+Inference-then-manage (agent-core 75adc2b44e parity): pass
+``agent_hint_manage={"action": ..., "target": ..., "start": ..., "end": ...}``
+per invoke to carry ``context_management.manage_request=false`` edits on a
+normal inference request, so the engine applies the edit after generation
+atomically (e.g. evicting an ephemeral attachment tail).
+
 Session resolution order per call: per-call / ``bind(session_id=...)`` kwargs
 → best-effort ``run_manager.metadata`` → constructor ``session_id``.
 """
@@ -304,6 +310,7 @@ class AscendAffinityChatModel(BaseChatModel):
         message_dicts: List[Dict[str, Any]],
         tools: Optional[Sequence[Dict[str, Any]]],
         payload: Dict[str, Any],
+        manage: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Salt-bind the request and release stale KV blocks when enabled."""
         if not self.enable_affinity:
@@ -318,10 +325,20 @@ class AscendAffinityChatModel(BaseChatModel):
         payload["cache_sharing"] = True
         payload["cache_salt"] = session_id
         if self.enable_agent_hint:
-            payload["agent_hint"] = {
-                "session_id": session_id,
-                "parent_session_id": parent_session_id or session_id,
-            }
+            payload["agent_hint"] = self._build_agent_hint(
+                session_id=session_id,
+                parent_session_id=parent_session_id or session_id,
+                action=manage.get("action", "evict") if manage else None,
+                target=manage.get("target", "messages") if manage else "session",
+                manage_request=False if manage else None,
+                msg_start=manage.get("start") if manage else None,
+                msg_end=manage.get("end") if manage else None,
+                tools_start=manage.get("tools_start") if manage else None,
+                tools_end=manage.get("tools_end") if manage else None,
+                include_tools=bool(manage.get("include_tools", False))
+                if manage
+                else False,
+            )
         if not self.release_endpoint:
             self._prefix_tracker.update(session_id, message_dicts, tools)
             return
@@ -649,6 +666,7 @@ class AscendAffinityChatModel(BaseChatModel):
         session_id = self._resolve_session_id(run_manager, kwargs)
         parent_session_id = self._resolve_parent_session_id(run_manager, kwargs)
         tools = kwargs.get("tools")
+        manage = kwargs.get("agent_hint_manage")
         payload = self._build_payload(messages, stop, tools)
         self._apply_affinity(
             session_id=session_id,
@@ -656,6 +674,7 @@ class AscendAffinityChatModel(BaseChatModel):
             message_dicts=payload["messages"],
             tools=tools,
             payload=payload,
+            manage=manage if isinstance(manage, dict) else None,
         )
         return payload
 

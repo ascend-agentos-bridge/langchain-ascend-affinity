@@ -160,3 +160,70 @@ class TestManagementMethods:
         with pytest.raises(ValueError, match="requires start and end"):
             model.evict_kvc(session_id="s1", target="messages",
                             messages=[HumanMessage(content="hi")])
+
+
+class TestInferenceThenManage:
+    def test_evict_tail_after_invoke(self, mocker):
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", enable_agent_hint=True
+        )
+        post = _patch_post(model, mocker)
+        model.invoke(
+            [HumanMessage(content="hello")],
+            config={"metadata": {"session_id": "s1"}},
+            agent_hint_manage={
+                "action": "evict",
+                "target": "messages",
+                "start": 1,
+                "end": 2,
+            },
+        )
+        payload = post.call_args[0][2]
+        assert payload["messages"] == [{"role": "user", "content": "hello"}]
+        assert payload["agent_hint"]["context_management"] == {
+            "manage_request": False,
+            "edits": [{"type": "evict", "target": "messages", "start": 1, "end": 2}],
+        }
+
+    def test_session_target_inference_then_manage(self, mocker):
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", enable_agent_hint=True
+        )
+        post = _patch_post(model, mocker)
+        model.invoke(
+            [HumanMessage(content="hi")],
+            config={"metadata": {"session_id": "s1"}},
+            agent_hint_manage={"action": "evict", "target": "session"},
+        )
+        payload = post.call_args[0][2]
+        assert payload["agent_hint"]["context_management"] == {
+            "manage_request": False,
+            "edits": [{"type": "evict", "target": "session"}],
+        }
+
+    def test_ignored_when_agent_hint_disabled(self, mocker):
+        model = AscendAffinityChatModel(base_url="http://engine.test/v1")
+        post = _patch_post(model, mocker)
+        model.invoke(
+            [HumanMessage(content="hi")],
+            config={"metadata": {"session_id": "s1"}},
+            agent_hint_manage={"action": "evict", "target": "session"},
+        )
+        payload = post.call_args[0][2]
+        assert "agent_hint" not in payload
+
+    def test_identity_when_no_manage_kwarg(self, mocker):
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", enable_agent_hint=True
+        )
+        post = _patch_post(model, mocker)
+        model.invoke(
+            [HumanMessage(content="hi")],
+            config={"metadata": {"session_id": "s1"}},
+        )
+        payload = post.call_args[0][2]
+        assert payload["agent_hint"] == {
+            "session_id": "s1",
+            "parent_session_id": "s1",
+        }
+        assert "context_management" not in payload["agent_hint"]
