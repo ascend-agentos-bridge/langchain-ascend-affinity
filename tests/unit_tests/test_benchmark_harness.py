@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+# pylint: disable=wrong-import-position  # repo-root path hack
 from benchmark import tasks as bench_tasks
 from benchmark.metrics import (
     NA,
@@ -165,8 +166,7 @@ class TestEngineSources:
         fake = mocker.MagicMock()
         fake.__enter__.return_value.read.return_value = body
         mocker.patch("urllib.request.urlopen", return_value=fake)
-        metrics = fetch_prometheus("http://engine/metrics")
-        assert metrics is not None
+        metrics = fetch_prometheus("http://engine/metrics") or {}
         assert metrics["vllm:gpu_prefix_cache_hits_total"] == 100.0
         after = dict(metrics)
         after["vllm:gpu_prefix_cache_hits_total"] = 180.0
@@ -298,4 +298,4 @@ class TestRunnerGlue:
     def test_recorder_end_without_start_ignored(self):
         recorder = TTFTRecorder("a", 0)
         recorder.on_llm_end(SimpleNamespace(generations=[]), run_id=uuid4())
-        assert recorder.calls == []
+        assert not recorder.calls

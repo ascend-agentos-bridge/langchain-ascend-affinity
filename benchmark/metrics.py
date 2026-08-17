@@ -35,7 +35,7 @@ PASS_MARK = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "N/A": "➖"}
 
 
 @dataclass
-class CallMetrics:
+class CallMetrics:  # pylint: disable=too-many-instance-attributes  # data carrier
     """Metrics of one LLM call observed from the client side."""
 
     agent: str
@@ -49,7 +49,7 @@ class CallMetrics:
 
 
 @dataclass
-class AgentMetrics:
+class AgentMetrics:  # pylint: disable=too-many-instance-attributes  # data carrier
     """Aggregated client-side metrics for one agent (one round or median)."""
 
     llm_calls: int = 0
@@ -188,7 +188,7 @@ CORE_FOUR = ("ttft_mean_ms", "prefill_per_call", "kv_hit_rate", "e2e_mean_ms")
 
 
 @dataclass
-class Verdict:
+class Verdict:  # pylint: disable=too-many-instance-attributes  # data carrier
     """One lab-sheet row: metric, reference range, delta and status."""
 
     metric: str

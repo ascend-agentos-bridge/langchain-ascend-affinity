@@ -80,7 +80,7 @@ def build_oj_tools() -> List[Any]:
     """The benchmark tools wrapped with openJiuwen's ``@tool`` decorator."""
     import json
 
-    from openjiuwen.core.foundation.tool import tool as oj_tool
+    from openjiuwen.core.foundation.tool import tool as oj_tool  # pylint: disable=import-error  # optional proprietary dep
 
     from benchmark import tasks
 
@@ -123,8 +123,12 @@ async def build_openjiuwen_agent(
     max_iterations: int = 60,
 ) -> Any:
     """Build one openJiuwen ReActAgent advisor (async: callback registry)."""
-    from openjiuwen.core.single_agent import AgentCard, ReActAgent, ReActAgentConfig
-    from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+    from openjiuwen.core.single_agent import (  # pylint: disable=import-error  # optional proprietary dep
+        AgentCard,
+        ReActAgent,
+        ReActAgentConfig,
+    )
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent  # pylint: disable=import-error  # optional proprietary dep
 
     label = "affinity" if affinity else "baseline"
     agent = ReActAgent(

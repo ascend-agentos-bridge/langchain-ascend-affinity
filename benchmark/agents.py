@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from deepagents import create_deep_agent
+from deepagents import create_deep_agent  # pylint: disable=import-error  # benchmark/requirements.txt
 
 from benchmark.tasks import build_tools
 
@@ -31,7 +31,7 @@ def build_baseline_model(
     emitting on_llm_new_token callbacks so client-side TTFT is measurable
     (identical sampling on both sides of the pair).
     """
-    from langchain_openai import ChatOpenAI
+    from langchain_openai import ChatOpenAI  # pylint: disable=import-error  # benchmark/requirements.txt
 
     return ChatOpenAI(
         model=model,
