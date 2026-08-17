@@ -173,8 +173,9 @@ no public engine implementation.
 The engine capability × supported-version matching list, the
 benefit-invalidation analysis on mismatch, and whether LLM gateways
 (LiteLLM / Higress / One API, etc.) pass affinity fields through are
-maintained **solely** in [COMPATIBILITY.md](COMPATIBILITY.md); the
-evidence discipline lives in section 1.4 of
+**centrally maintained** in [COMPATIBILITY.md](COMPATIBILITY.md)
+(not an unchecked authority — on any change, cross-verify against
+upstream sources); the evidence discipline lives in section 1.4 of
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
 
 

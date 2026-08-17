@@ -131,9 +131,21 @@ to confirm non-zero salt bindings and that releases are not intercepted.
 
 ## 5. Maintenance rules
 
-On every maintenance pass (or when an upstream release/PR changes state),
-re-verify the following entries, update the matrices in sections 2/3/4,
-and refresh the verification date above:
+This document is the **central maintenance point for compatibility
+facts, not an unchecked authority** — it can be outdated or wrong too.
+Every maintenance pass (or when an upstream release/PR changes state)
+must:
+
+1. **cross-verify multiple sources** (the entries below: upstream
+   official docs, release notes, PR/issue threads, real-engine probes
+   when necessary) instead of relying on this document's prior
+   conclusions;
+2. update the section 2/3/4 matrices with the cross-verified conclusion
+   **here first**, and refresh the verification date above;
+3. **review all project md files** (root README pair,
+   `benchmark/README*.md`, `benchmark/PRINCIPLES.md`, etc.) to sync
+   their summaries and keep both languages consistent (see the
+   "documentation consistency" section of `AGENTS.md`).
 
 | Check | Entry |
 |---|---|

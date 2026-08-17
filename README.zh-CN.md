@@ -159,8 +159,9 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 在于未合入的 vllm-ascend PR #6722，`agent_hint` 公开引擎零实现。
 
 引擎能力 × 支持版本匹配列表、不匹配时哪些收益失效、以及 LLM 网关
-（LiteLLM / Higress / One API 等）能否透传亲和字段，**统一且唯一**维护在
-[COMPATIBILITY.zh-CN.md](COMPATIBILITY.zh-CN.md)；判定纪律见
+（LiteLLM / Higress / One API 等）能否透传亲和字段，**集中维护**在
+[COMPATIBILITY.zh-CN.md](COMPATIBILITY.zh-CN.md)（非免检权威，变更时
+须与上游来源交叉比对）；判定纪律见
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md) 1.4 节。
 
 

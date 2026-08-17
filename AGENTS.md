@@ -10,16 +10,22 @@
 
 ## 文档一致性（重要）
 
-- **单一事实源**：引擎能力 × 支持版本匹配列表、收益失效分析、LLM 网关
-  透传矩阵的**唯一权威版本**是 `COMPATIBILITY.md` / `COMPATIBILITY.zh-CN.md`
-  （两份同步，仅语言不同）。其他 md（根 README 双语、`benchmark/PRINCIPLES.md`、
+- **集中维护 + 交叉比对**：引擎能力 × 支持版本匹配列表、收益失效分析、
+  LLM 网关透传矩阵**集中维护**在 `COMPATIBILITY.md` / `COMPATIBILITY.zh-CN.md`
+  （两份同步，仅语言不同），其他 md（根 README 双语、`benchmark/PRINCIPLES.md`、
   `benchmark/README*.md`）只做一句话要点简述并链接，**不得复制细节表格或
   版本号清单**，防止多份拷贝漂移。
+- **COMPATIBILITY 不是免检权威**：它同样可能过时或出错。任何相关变更
+  （引擎/网关上游 release、PR/RFC 状态变化、本库协议字段调整）都必须
+  **交叉比对多方来源**（上游官方文档、release notes、PR/issue、真机探测
+  结果），而非单信 COMPATIBILITY 已有结论；发现其与上游事实不符时，
+  先改 COMPATIBILITY，再同步全项目。
 - **任何 md 文件修改后，必须通看项目内全部 md 文件**（根 README 双语、
   COMPATIBILITY 双语、`benchmark/README*.md`、`benchmark/PRINCIPLES.md`、
   `AGENTS.md`、`REQUIREMENTS.md`、`openspec/` 下的 md），核对：
-  - 交叉引用链接是否有效、指向是否仍是"唯一权威版本"；
-  - 事实陈述（版本号、PR/RFC 状态、字段语义）是否与 COMPATIBILITY 一致；
+  - 交叉引用链接是否有效、要点简述是否仍与 COMPATIBILITY 一致；
+  - 事实陈述（版本号、PR/RFC 状态、字段语义）是否与上游来源交叉比对
+    后的结论一致；
   - 双语文件之间内容是否同步。发现漂移立即修复后才能提交。
 
 ## 工程命令
