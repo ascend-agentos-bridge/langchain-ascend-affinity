@@ -60,7 +60,8 @@ streaming`）。各探测项对引擎的要求：
 
 | 探测项 | 端点 | 不满足的后果 |
 |---|---|---|
-| 可达性 + 模型列表 | `GET {engine-url}/models`，返回 `data[].id` | **直接退出**并给出指引 |
+| 可达性 | `GET {engine-url}/models`（任意 HTTP 200） | **直接退出**并给出指引 |
+| 模型列表 | `GET {engine-url}/models`，返回 `data[].id` | 不阻断——打印 `model_listed=False` 后继续运行 |
 | 流式 | `POST /chat/completions` 带 `stream: true`（SSE `data:` 帧） | 不阻断，但 lc 配对的 TTFT 失效 |
 | 部分释放 | `POST {engine-root}/release_kv_cache`（404/405 视为无此端点） | 不阻断，亲和释放收益丧失，`affinity_stats` 可见 |
 

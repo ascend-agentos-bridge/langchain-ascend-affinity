@@ -63,7 +63,8 @@ At start the runner probes the engine and prints the verdict
 
 | Probe | Endpoint | Blocks the run? |
 |---|---|---|
-| reachability + model list | `GET {engine-url}/models` returning `data[].id` | **yes** — exits with guidance |
+| reachability | `GET {engine-url}/models` (any HTTP 200) | **yes** — exits with guidance |
+| model list | `GET {engine-url}/models` returning `data[].id` | no — `model_listed=False` is printed; the run continues |
 | streaming | `POST /chat/completions` with `stream: true` (SSE `data:` frames) | no — but lc-pair TTFT degrades |
 | partial release | `POST {engine-root}/release_kv_cache` (404/405 = absent) | no — affinity release gain is lost, visible in `affinity_stats` |
 
