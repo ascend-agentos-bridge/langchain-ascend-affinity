@@ -116,9 +116,30 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 元数据（`config={"metadata": {"session_id": ...}}`，多会话服务推荐，
 可穿透智能体/图层层传递）→ 构造参数 `session_id`（兜底）。
 
-**引擎要求**：salt 绑定需要引擎支持前缀缓存 salt（vLLM ≥ 0.9 风格）；部分
-释放需要 agent-core 兼容的 `/release_kv_cache` 端点。若引擎不支持，模型照常
-工作——亲和字段被引擎忽略，释放失败仅产生非致命告警。
+## 引擎接口要求
+
+`AscendAffinityChatModel` 可对接任何 OpenAI 兼容引擎，但亲和收益取决于
+以下接口契约。
+
+**必需基线（任何引擎都能跑）**
+
+| 接口 | 要求 |
+|---|---|
+| `POST {base_url}/chat/completions` | OpenAI 兼容 `messages`；工具调用智能体需支持 `tools`；测 TTFT 需支持 `stream`（SSE） |
+| 认证 | `Authorization: Bearer <api_key>` |
+
+**亲和契约（决定有没有收益）**
+
+| 本库发送什么 | 引擎应做什么 | 缺失/被忽略时的行为 |
+|---|---|---|
+| 请求体携带 `cache_sharing: true` | 允许该会话加入前缀缓存共享 | 无收益，无害 |
+| 请求体携带 `cache_salt: <session_id>` | 按 vLLM-Ascend 前缀缓存 salt 语义：同 salt 会话获得独立 KV 桶，不被无关请求的 LRU 驱逐 | 退回共享 LRU 桶——无隔离、无收益 |
+| 检测到前缀被改写时 `POST {engine-root}/release_kv_cache`，携带 `model`、`cache_salt`、`cache_sharing`、`messages`、`messages_released_index`（以及可选的 `tools`、`tools_released_index`） | 按 agent-core 兼容的部分释放语义：从释放下标起丢弃脏块，保留有效前缀 | 记入 `releases_failed` 计数并告警；改写频繁的智能体失去释放收益 |
+
+降级始终安全：符合规范的网关会忽略未知字段，释放失败仅产生非致命告警，
+模型作为普通 OpenAI 客户端照常工作。引擎的实际行为由基准测试显式暴露
+（release 端点探测、`affinity_stats`、疑似假亲和警报）——见
+[benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md)。
 
 ## 验证
 

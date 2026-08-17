@@ -53,6 +53,32 @@ python benchmark/run_benchmark.py
   `--max-parallel`（默认 2）、`--turn-timeout`（默认 240 秒）、
   `--report-dir`。
 
+## 引擎接口要求
+
+开跑前脚本会探测引擎并打印结果（`model_listed / release_endpoint /
+streaming`）。各探测项对引擎的要求：
+
+| 探测项 | 端点 | 不满足的后果 |
+|---|---|---|
+| 可达性 + 模型列表 | `GET {engine-url}/models`，返回 `data[].id` | **直接退出**并给出指引 |
+| 流式 | `POST /chat/completions` 带 `stream: true`（SSE `data:` 帧） | 不阻断，但 lc 配对的 TTFT 失效 |
+| 部分释放 | `POST {engine-root}/release_kv_cache`（404/405 视为无此端点） | 不阻断，亲和释放收益丧失，`affinity_stats` 可见 |
+
+探测之外，要求数据可信还需：
+
+- **usage 透传** —— 响应携带 `usage.prompt_tokens` /
+  `completion_tokens` / `prompt_tokens_details.cached_tokens`；缺
+  `cached_tokens` 时客户端 KV 命中率显示 ➖。
+- **亲和字段** —— 引擎须按[根 README 的接口契约](../README.zh-CN.md#引擎接口要求)
+  处理 `cache_salt` / `cache_sharing` 与释放端点；否则亲和退化为普通
+  客户端，化验单会如实呈现。
+- **不要按 key 限流** —— 四个 agent 设计上共用一个 API key；若网关对
+  该 key 配置 RPM/TPM 配额，排队噪声会污染所有时延指标。请在测试
+  窗口内放开配额。
+- 引擎侧 / NPU 侧指标可选，分别依赖 `--metrics-url`（vLLM 风格
+  Prometheus `/metrics`）与 `--npu-cmd`（引擎机上的 `key=value`
+  采样命令）。
+
 ## 测量指标
 
 | 指标 | 采集方式 | 说明 |

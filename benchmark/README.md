@@ -56,6 +56,33 @@ Options:
   no-auth engines), `--max-parallel` (default 2), `--turn-timeout`
   (default 240 s), `--report-dir`.
 
+## Engine interface requirements
+
+At start the runner probes the engine and prints the verdict
+(`model_listed / release_endpoint / streaming`). What each probe needs:
+
+| Probe | Endpoint | Blocks the run? |
+|---|---|---|
+| reachability + model list | `GET {engine-url}/models` returning `data[].id` | **yes** — exits with guidance |
+| streaming | `POST /chat/completions` with `stream: true` (SSE `data:` frames) | no — but lc-pair TTFT degrades |
+| partial release | `POST {engine-root}/release_kv_cache` (404/405 = absent) | no — affinity release gain is lost, visible in `affinity_stats` |
+
+Beyond the probes, for trustworthy numbers:
+
+- **usage passthrough** — responses should carry
+  `usage.prompt_tokens` / `completion_tokens` /
+  `prompt_tokens_details.cached_tokens`; without `cached_tokens` the
+  client-side KV hit rate renders ➖.
+- **affinity fields** — the engine must honour `cache_salt` /
+  `cache_sharing` and the release endpoint per the contract in the
+  [root README](../README.md#engine-interface-requirements); otherwise
+  affinity degrades to a plain client and the lab sheet will show it.
+- **no per-key rate limiting** — all four agents share one API key by
+  design; RPM/TPM quotas on that key inject queuing noise into every
+  latency figure. Lift the quota for the benchmark window.
+- optional engine/NPU metrics need `--metrics-url` (vLLM-style Prometheus
+  `/metrics`) and `--npu-cmd` (a `key=value` sampler on the engine host).
+
 ## What it measures
 
 | Metric | How | Notes |

@@ -63,7 +63,9 @@ KV 被盐"钉"在槽位里不被 LRU 驱逐；工具结束后下一轮请求直�
 > （MindIE 的 inline agent_hint 字段，或自定义引擎的
 > `/release_kv_cache`）。若引擎不认识这些字段，亲和请求会退化为普通
 > 请求——报告里 `affinity_stats.releases_failed` 与"假亲和警报"
-> 会把这种情况暴露出来。
+> 会把这种情况暴露出来。字段级完整契约（请求字段、端点、降级行为）
+> 见根 README 的"引擎接口要求"小节，测试侧的探测项与限流约束见
+> benchmark README 的"引擎接口要求"小节。
 
 ---
 

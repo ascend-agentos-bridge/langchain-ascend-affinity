@@ -121,10 +121,31 @@ metadata (`config={"metadata": {"session_id": ...}}`, recommended for
 multi-session services — propagates through agents/graphs) → constructor
 `session_id` (fallback).
 
-**Engine requirements**: prefix-cache salt support (vLLM ≥ 0.9 style) for salt
-binding, and an agent-core compatible `/release_kv_cache` endpoint for partial
-release. Without them the model still works — affinity fields are simply
-ignored by the engine and release failures stay non-fatal warnings.
+## Engine interface requirements
+
+`AscendAffinityChatModel` works with any OpenAI-compatible engine, but the
+affinity gain is conditional on the following interface contract.
+
+**Required baseline (works everywhere)**
+
+| Interface | Requirement |
+|---|---|
+| `POST {base_url}/chat/completions` | OpenAI-compatible `messages`; `tools` for tool-calling agents; `stream` (SSE) for TTFT measurement |
+| Auth | `Authorization: Bearer <api_key>` |
+
+**Affinity contract (decides whether there is any gain)**
+
+| What this library sends | Engine expectation | If missing / ignored |
+|---|---|---|
+| `cache_sharing: true` in the request body | opt the session into prefix-cache sharing | no gain, harmless |
+| `cache_salt: <session_id>` in the request body | vLLM-Ascend-style prefix-cache salt: same-salt sessions get an isolated KV bucket that LRU cannot evict for unrelated requests | falls back to the shared LRU bucket — no isolation, no gain |
+| `POST {engine-root}/release_kv_cache` with `model`, `cache_salt`, `cache_sharing`, `messages`, `messages_released_index` (+ `tools`, `tools_released_index`) — only when the client detects a rewritten prefix | agent-core-compatible partial release: drop blocks from the released index, keep the valid prefix | `releases_failed` counter + warning; rewrite-heavy agent loops lose the release gain |
+
+Degradation is always safe: standards-compliant gateways ignore unknown
+fields, release failures stay non-fatal warnings, and the model keeps working
+as a plain OpenAI client. The benchmark makes the engine's actual behaviour
+visible (release-endpoint probe, `affinity_stats`, suspected-false-affinity
+alert) — see [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
 
 ## Verification
 
