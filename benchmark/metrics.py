@@ -233,7 +233,11 @@ def judge(
         )
     if affinity is None or baseline is None:
         return Verdict(metric, rule.label, reference, baseline, affinity, None, rule.unit, NA)
-    delta = (affinity - baseline) / baseline * 100.0 if baseline else None
+    delta = (
+        (affinity - baseline)
+        if rule.unit == "pp"
+        else ((affinity - baseline) / baseline * 100.0 if baseline else None)
+    )
     if delta is None:
         return Verdict(metric, rule.label, reference, baseline, affinity, None, rule.unit, NA)
     if rule.direction == 0:  # flat expectations: smaller |delta| is better

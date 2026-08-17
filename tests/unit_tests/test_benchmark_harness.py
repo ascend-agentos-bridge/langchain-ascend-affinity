@@ -106,7 +106,9 @@ class TestVerdicts:
 
     def test_kv_hit_rate_uses_percentage_points(self):
         assert judge("kv_hit_rate", 40.0, 25.0).status == PASS  # +15pp
+        assert judge("kv_hit_rate", 40.0, 25.0).delta == pytest.approx(15.0)
         assert judge("kv_hit_rate", 24.0, 25.0).status == "WARN"  # -1pp
+        assert judge("kv_hit_rate", 24.0, 25.0).delta == pytest.approx(-1.0)
         assert judge("kv_hit_rate", 20.0, 25.0).status == "FAIL"
 
     def test_missing_data_is_na(self):
