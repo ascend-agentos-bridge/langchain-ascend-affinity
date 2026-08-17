@@ -38,6 +38,20 @@ Agent 与推理引擎之间存在天然的信息不对称：
 | **前缀差异检测**（prefix diff） | 客户端逐消息比对当前请求与上一窗口的消息序列，检测"纯追加"还是"发生改写" | 消息序列 + 工具列表指纹 |
 | **部分 KV 释放**（partial release） | 检测到分叉时，向引擎 `POST /release_kv_cache`，携带 `messages_released_index` 精确指出从第几条消息起失效，引擎只丢弃脏块、保留仍然命中的前缀 | 前缀差异检测结果 |
 
+除上述默认的 **release 协议**外（阶段 A，2026-08），`AscendAffinityChatModel`
+还支持 openjiuwen agent-core 的 **agent_hint 生命周期协议**（opt-in，
+`enable_agent_hint=True`）：
+
+| 能力 | 做什么 | 触发方式 |
+|---|---|---|
+| **身份字段** | 每次请求携带 `agent_hint: {session_id, parent_session_id}`（血缘支持团队/成员） | 自动（启用后随每次调用） |
+| **生命周期管理** | `evict_kvc` / `offload_kvc` / `prefetch_kvc` 显式管理请求（`context_management.manage_request=true`） | 用户/框架在生命周期点显式调用 |
+| **推理后管理** | 同一请求内 `manage_request=false`：推理完成后由引擎原子执行编辑（如 evict 附件尾巴） | 调用时传 `agent_hint_manage={...}` |
+| **空闲自动 evict** | 生成后空闲超过 `idle_evict_after_seconds`（默认 0=关）自动 `evict_kvc`；新请求取消重排 | 配置启用 |
+
+两条协议均**安全降级**：引擎忽略未知字段即退化为普通 OpenAI 请求；
+管理失败仅计数/告警，绝不中断生成。
+
 ### 1.3 生效调用链
 
 ```
@@ -45,10 +59,11 @@ Agent（deepagents / openJiuwen ReActAgent）
   │  会话上下文 + 生命周期
   ▼
 AscendAffinityChatModel / InferenceAffinity provider
-  │  cache_salt 注入 + 前缀 diff + release 指令
+  │  release：cache_salt 注入 + 前缀 diff + release 指令
+  │  agent_hint：session_id/parent_session_id + evict/offload/prefetch
   ▼
 推理引擎（MindIE / vLLM-Ascend，OpenAI 兼容 API）
-  │  按 salt 调度 KV 槽位；按 release 索引丢脏块
+  │  按 salt 调度 KV 槽位；按 release 索引丢脏块；按 agent_hint 管理
   ▼
 昇腾 NPU（KV Cache 显存 + 计算核）
 ```
@@ -59,13 +74,12 @@ KV 被盐"钉"在槽位里不被 LRU 驱逐；工具结束后下一轮请求直�
 上文（如撤销某轮操作），baseline 只能让引擎留着一整段脏缓存，亲和
 路径则精确释放失效部分，腾出槽位给活跃会话。
 
-> 注意：这一切的前提是**引擎侧实现**了 salt 调度与 release 端点
-> （MindIE 的 inline agent_hint 字段，或自定义引擎的
-> `/release_kv_cache`）。若引擎不认识这些字段，亲和请求会退化为普通
-> 请求——报告里 `affinity_stats.releases_failed` 与"假亲和警报"
-> 会把这种情况暴露出来。字段级完整契约（请求字段、端点、降级行为）
-> 见根 README 的"引擎接口要求"小节，测试侧的探测项与限流约束见
-> benchmark README 的"引擎接口要求"小节。
+> 注意：这一切的前提是**引擎侧实现**了 salt 调度 / release 端点 /
+> agent_hint 管理。若引擎不认识这些字段，亲和请求会退化为普通请求——
+> 报告里 `affinity_stats.releases_failed` / `management_failed` 与
+> "假亲和警报"会把这种情况暴露出来。字段级完整契约（请求字段、端点、
+> 降级行为）见根 README 的"引擎接口要求"与"协议兼容"小节，测试侧的
+> 探测项与限流约束见 benchmark README 的"引擎接口要求"小节。
 
 ---
 

@@ -111,6 +111,7 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 | `enable_affinity` | `True` | `False` = 普通 OpenAI 兼容客户端 |
 | `release_endpoint` | `/release_kv_cache` | 部分释放路径；置 `""` 禁用 |
 | `enable_agent_hint` | `False` | 可选启用 agent_hint 生命周期协议（见下文） |
+| `idle_evict_after_seconds` | `0.0` | 生成后空闲超过该秒数自动 evict 会话 KV 缓存（0=关闭；需 `enable_agent_hint`） |
 | `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | 常规请求选项 |
 
 每次调用的会话解析顺序：逐调用 / `bind(session_id=...)` 参数 → 运行
@@ -158,10 +159,15 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 | 协议 | 客户端发送内容 | 本库状态 |
 |---|---|---|
 | **release（默认）** | 每次绑定会话的请求携带 `cache_sharing: true` + `cache_salt: <session_id>`；检测到历史改写时 `POST {engine-root}/release_kv_cache`，携带 `model` / `cache_salt` / `cache_sharing` / `messages` / `messages_released_index`（及可选 `tools` / `tools_released_index`） | 与 agent-core `InferenceAffinityModelClient.release()` 字节兼容；前缀差异调度自动完成 |
-| **agent_hint 生命周期（阶段 A，可选）** | 聊天请求携带 `agent_hint: {session_id, parent_session_id}` 身份字段；`evict_kvc` / `offload_kvc` / `prefetch_kvc` 管理方法发送 `context_management: {manage_request: true, edits: [{type, target, start, end}]}` | 与 agent-core `AscendAffinityModelClient`（2026-07 `63380f17e8`）字段级一致；管理动作默认**关闭**（设 `enable_agent_hint=True` 启用） |
+| **agent_hint 生命周期（阶段 A，可选）** | 聊天请求携带 `agent_hint: {session_id, parent_session_id}` 身份字段；`evict_kvc` / `offload_kvc` / `prefetch_kvc` 管理方法发送 `context_management: {manage_request: true, edits: [{type, target, start, end}]}`；推理后管理（`manage_request: false`）经 `agent_hint_manage={...}` 触发；空闲自动 evict 经 `idle_evict_after_seconds` 配置 | 与 agent-core `AscendAffinityModelClient`（2026-07 `63380f17e8`、vLLM 修复 `75adc2b44e`）字段级一致；管理动作默认**关闭**（设 `enable_agent_hint=True` 启用） |
 
 两条协议都安全降级：忽略未知字段的引擎会把请求当作普通 OpenAI 调用；
-管理请求失败仅记录/计数，绝不致命。新生命周期协议按阶段引入——先做
+管理请求失败仅记录/计数，绝不致命。
+
+`base_url` 支持裸 origin（`http://host:8000`）、带 `/v1`（`http://host:8000/v1`）
+或完整 `/chat/completions` 端点三种形态；release 端点解析在引擎根路径
+（去掉 `/v1` 的 origin）。认证可选：匿名引擎设 `api_key=""` 即不发送
+`Authorization` 头。新生命周期协议按阶段引入——先做
 身份字段与显式管理，模型内自动调度须待真实引擎证据（判定纪律见
 `benchmark/PRINCIPLES.md`）。
 

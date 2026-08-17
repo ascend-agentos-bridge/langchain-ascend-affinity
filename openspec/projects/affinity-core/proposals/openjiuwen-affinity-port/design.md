@@ -73,3 +73,21 @@ langchain_ascend/
     chat_ascend.py   # AscendAffinityChatModel
 ```
 
+
+### D6 — agent_hint lifecycle protocol (stage A, opt-in, 2026-08)
+Following openjiuwen agent-core's AscendAffinity commit (`63380f17e8`) and
+its vLLM joint-debugging fixes (`75adc2b44e`), the model also speaks the
+request-inline `agent_hint` lifecycle protocol, opt-in via
+`enable_agent_hint`:
+
+- normal calls carry `agent_hint: {session_id, parent_session_id}` identity;
+- `evict_kvc` / `offload_kvc` / `prefetch_kvc` send pure management requests
+  (`context_management.manage_request=true`, `edits` with `type/target/start/end`);
+- per-call `agent_hint_manage={...}` carries `manage_request=false` edits on
+  an inference request (inference-then-manage, atomic);
+- `idle_evict_after_seconds` (default 0) arms a best-effort timer that evicts
+  the session after idle; any new call cancels/re-arms.
+
+All management paths default off, are never fatal, and degrade safely when
+the engine ignores unknown fields. The release protocol (D2/D4) remains the
+default and is byte-compatible with agent-core `InferenceAffinityModelClient.release()`.
