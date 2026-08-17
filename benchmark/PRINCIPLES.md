@@ -34,7 +34,7 @@ Agent 与推理引擎之间存在天然的信息不对称：
 
 | 机制 | 做什么 | 判定依据 |
 |---|---|---|
-| **会话盐绑定**（cache_salt） | 每个请求注入 `cache_salt: <session_id>`，与 vLLM-Ascend 原生 prefix-cache salt 语义对齐；引擎按 salt 把该会话的 KV 路由到专属槽位，不会被无关请求挤占 | 会话 ID（每任务唯一） |
+| **会话盐绑定**（cache_salt） | 每个请求注入 `cache_salt: <session_id>`，与 vLLM 原生 prefix-cache salt 语义对齐：salt 注入首块哈希，后续块哈希依赖父块，形成会话专属的隔离命名空间——同 salt 才能复用，跨会话互不串缓存 | 会话 ID（每任务唯一） |
 | **前缀差异检测**（prefix diff） | 客户端逐消息比对当前请求与上一窗口的消息序列，检测"纯追加"还是"发生改写" | 消息序列 + 工具列表指纹 |
 | **部分 KV 释放**（partial release） | 检测到分叉时，向引擎 `POST /release_kv_cache`，携带 `messages_released_index` 精确指出从第几条消息起失效，引擎只丢弃脏块、保留仍然命中的前缀 | 前缀差异检测结果 |
 
@@ -53,11 +53,15 @@ AscendAffinityChatModel / InferenceAffinity provider
 昇腾 NPU（KV Cache 显存 + 计算核）
 ```
 
-关键收益场景是**工具调用间隙**：调工具期间会话暂时静默，亲和请求的
-KV 被盐"钉"在槽位里不被 LRU 驱逐；工具结束后下一轮请求直接命中缓存，
-跳过大部分 prefill，TTFT 显著下降。其次是**历史改写**：客户端改写了
-上文（如撤销某轮操作），baseline 只能让引擎留着一整段脏缓存，亲和
-路径则精确释放失效部分，腾出槽位给活跃会话。
+关键收益场景是**工具调用间隙**：调工具期间会话暂时静默；带 salt 的
+下一轮请求直接命中同命名空间缓存，跳过大部分 prefill，TTFT 显著
+下降。其次是**历史改写**：客户端改写了上文（如撤销某轮操作），
+baseline 只能让引擎留着一整段脏缓存，亲和路径则精确释放失效部分，
+腾出槽位给活跃会话。
+
+> 精确地说：salt 提供的是**隔离与命中**，不是**驻留保证**——显存
+> 压力下的驱逐策略仍由引擎决定（vLLM 为全局 LRU）。把会话 KV 主动
+> "钉住/驱逐/卸载/预取"是 agent_hint 生命周期协议要补的一环。
 
 > 注意：这一切的前提是**引擎侧实现**了 salt 调度与 release 端点
 > （MindIE 的 inline agent_hint 字段，或自定义引擎的
@@ -67,17 +71,23 @@ KV 被盐"钉"在槽位里不被 LRU 驱逐；工具结束后下一轮请求直�
 > 见根 README 的"引擎接口要求"小节，测试侧的探测项与限流约束见
 > benchmark README 的"引擎接口要求"小节。
 
-### 1.4 主流引擎现状对照（以 MindIE 3.0.0 公开文档为准）
+### 1.4 主流引擎现状对照（MindIE 3.0.0 公开文档 / vLLM-Ascend v0.23）
 
-本库依赖的接口在引擎侧的落地情况（核对于 MindIE-LLM `dev` 分支
-公开文档，2026-08）：
+本库依赖的接口在两类引擎侧的落地情况（核对时间 2026-08）：
 
-| 依赖 | MindIE 3.0.0 公开接口现状 |
-|---|---|
-| `POST /v1/chat/completions` / `GET /v1/models` / `GET /metrics` | ✅ 支持。另有 `GET /metrics-json`：直接输出 TTFT/TBT 动态均值、执行/等待请求数、剩余 NPU block 数，可作引擎侧指标的补充源 |
-| `cache_salt` 逐请求会话隔离 | ❌ 无此请求字段。Prefix Cache 为**内容哈希**跨会话复用，经服务端 `config.json` 的 `plugin_params: {"plugin_type":"prefix_cache"}` 开启 |
-| `POST /release_kv_cache` 部分释放 | ❌ 公开 RESTful 清单无此端点（主动失效目前是 vLLM 社区 RFC #37168 提案，尚未合入任何引擎主线） |
-| `agent_hint` 生命周期字段 | ❌ 公开文档无此字段（openJiuwen×昇腾联合特性，evict/offload/prefetch，需定制版引擎） |
+| 依赖 | MindIE 3.0.0（公开接口） | vLLM-Ascend（≥ v0.9.1） |
+|---|---|---|
+| `POST /v1/chat/completions` / `GET /v1/models` / `GET /metrics` | ✅ 支持。另有 `GET /metrics-json`：直接输出 TTFT/TBT 动态均值、执行/等待请求数、剩余 NPU block 数 | ✅ 支持（vLLM 原生 `/metrics` 含 prefix-cache hit 计数） |
+| `cache_salt` 逐请求会话隔离 | ❌ 无此请求字段。Prefix Cache 为**内容哈希**跨会话复用，经服务端 `config.json` 的 `plugin_params: {"plugin_type":"prefix_cache"}` 开启 | ✅ **vLLM 核心原生字段**（chat/completions、completions、responses 三个端点均接受）。salt 注入首块哈希 → 同 salt 复用、异 salt 隔离。需服务端 `--enable-prefix-caching` |
+| `POST /release_kv_cache` 部分释放 | ❌ 公开 RESTful 清单无此端点 | ❌ 无（vLLM RFC #37168 提案中：主动失效 + 会话引用计数 + Aging/Fresh 双区调度，未合入任何版本） |
+| `agent_hint` 生命周期字段 | ❌ 公开文档无此字段（openJiuwen×昇腾联合特性，需定制版引擎） | ❌ 无（不在 vLLM 生态路线） |
+
+**一个关键的语义辨析**：vLLM 的 `cache_salt` 本质是**隔离命名空间**
+（官方动机是多租户防串缓存/防时序攻击），不是"钉住不被驱逐"——显存
+不足时全局 LRU 照样逐出 salt 桶里的块。因此在 vLLM-Ascend 上：
+salt 生效 → 同会话跨轮命中 ↑、prefill ↓（**这部分收益真实可测**）；
+但工具调用间隙的"驻留保护"仍靠 LRU 运气。主动驱逐/钉住/预取正是
+RFC #37168 与 agent_hint 要补的缺口。
 
 MindIE Prefix Cache 的叠加约束（直接影响 agent 场景）：不支持
 prefix cache 与 context parallel + sequence parallel +
@@ -85,13 +95,18 @@ function call(multiturn) 叠加；与 Multi-LoRA、SplitFuse+数据并行
 互斥；复用按 block 粒度（blocksize 的整数倍）；模型限 Qwen2/2.5/3、
 DeepSeek-R1/V3 系列。
 
-**实际含义**：在存量 MindIE 上运行本库，亲和字段被安全忽略，退化
-为"普通 OpenAI 客户端 + 引擎全局内容哈希前缀缓存"——多轮 agent
-的公共前缀（系统提示词、工具定义、早期历史）仍可命中，拿到**部分**
-TTFT 收益；但没有会话隔离与主动释放，`affinity_stats` 会显示
-salt 未生效。完整的算力亲和收益需要 vLLM-Ascend（`cache_salt`
-语义落地后）或带 agent-hint 补丁的 MindIE 定制版。这正是本基准
-测试要区分的三种结果：**真亲和 / 部分收益（纯前缀缓存）/ 假亲和**。
+**实际含义（按真机验证平台排序）**：
+
+- **vLLM-Ascend（契约 3/4：chat + salt + metrics）**——salt 真实
+  生效，benchmark 中 affinity 配对的命中率/prefill 应可见差异；
+  release 计数失败属预期。
+- **存量 MindIE（契约 1/4：仅内容哈希缓存）**——亲和字段被安全忽略，
+  多轮 agent 的公共前缀仍可命中拿到部分 TTFT 收益，但无会话隔离、
+  无主动释放，`affinity_stats` 显示 salt 未生效。
+- **完整算力亲和（4/4）**——需要带 agent-hint 补丁的定制引擎。
+
+这正是本基准测试要区分的三种结果：**真亲和 / 部分收益（纯前缀
+缓存）/ 假亲和**。
 
 ---
 
@@ -245,3 +260,15 @@ python benchmark/run_benchmark.py --setup \
 释放。报告中 salt 绑定与 release 指标为 0/失败属预期行为，不代表
 本库故障——引擎侧若开启了 Prefix Cache 插件，可对照
 `--metrics-url` 的命中率变化验证这部分收益。
+
+**Q10：在 vLLM-Ascend 上跑呢？salt 不是原生字段吗？**
+
+是——`cache_salt` 是 vLLM 核心原生请求字段（三个 OpenAI 兼容端点
+都接受），vLLM-Ascend 复用 vLLM v1 调度器，salt 直接生效（需
+`--enable-prefix-caching`）。因此 affinity 配对的 KV 命中率与
+prefill tokens 指标应能看到真实差异，这是当前**最有说服力的真机
+验证平台**。但注意两点：其一，vLLM 的 salt 语义是**隔离命名空间**
+（同 salt 才能复用），不是驻留保证——显存压力下 LRU 照样逐出，
+"钉住"要等 RFC #37168 或 agent_hint 落地；其二，`/release_kv_cache`
+不存在，`releases_failed` 计数持续增长属预期，报告中 release 相关
+行会呈现 ➖/FAIL，不代表 salt 失效。

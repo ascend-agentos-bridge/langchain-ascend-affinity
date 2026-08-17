@@ -137,7 +137,7 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 | 本库发送什么 | 引擎应做什么 | 缺失/被忽略时的行为 |
 |---|---|---|
 | 请求体携带 `cache_sharing: true` | 允许该会话加入前缀缓存共享 | 无收益，无害 |
-| 请求体携带 `cache_salt: <session_id>` | 按 vLLM-Ascend 前缀缓存 salt 语义：同 salt 会话获得独立 KV 桶，不被无关请求的 LRU 驱逐 | 退回共享 LRU 桶——无隔离、无收益 |
+| 请求体携带 `cache_salt: <session_id>` | 按 vLLM 前缀缓存 salt 语义：salt 注入首块哈希，同 salt 会话获得隔离的 KV 命名空间，异 salt 请求无法复用（显存压力下的驱逐策略仍由引擎决定） | 退回共享缓存桶——无隔离、无收益 |
 | 检测到前缀被改写时 `POST {engine-root}/release_kv_cache`，携带 `model`、`cache_salt`、`cache_sharing`、`messages`、`messages_released_index`（以及可选的 `tools`、`tools_released_index`） | 按 agent-core 兼容的部分释放语义：从释放下标起丢弃脏块，保留有效前缀 | 记入 `releases_failed` 计数并告警；改写频繁的智能体失去释放收益 |
 
 **未绑定 session**——模型不发送任何亲和字段，保持普通 OpenAI 客户端。
@@ -155,9 +155,15 @@ RESTful 接口未提供逐请求 `cache_salt`、`/release_kv_cache` 端点或
 `config.json` 配置 `plugin_params: {"plugin_type":"prefix_cache"}` 开启，
 且不支持与 function call(multiturn) + context/sequence parallel 叠加。
 因此在存量 MindIE 上，本库安全退化为"普通 OpenAI 客户端 + 引擎全局
-前缀缓存"（多轮 agent 仍有公共前缀命中收益，但无会话隔离与主动释放）；
-完整亲和收益依赖 vLLM-Ascend salt 语义或带 agent-hint 补丁的定制引擎。
-逐项对照表见 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md) 1.4 节。
+前缀缓存"（多轮 agent 仍有公共前缀命中收益，但无会话隔离与主动释放）。
+
+**vLLM-Ascend 现状**：`cache_salt` 是 vLLM 核心原生请求字段
+（需 `--enable-prefix-caching`），在 vLLM-Ascend 上直接生效——同
+salt 复用、异 salt 隔离，是当前最有说服力的真机验证平台；但注意其
+语义是隔离命名空间而非驻留保证，且 `/release_kv_cache` 与
+`agent_hint` 仍不存在。完整亲和收益依赖 vLLM RFC #37168 落地或
+带 agent-hint 补丁的定制引擎。逐项对照表见
+[benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md) 1.4 节。
 
 
 ## 与 openjiuwen agent-core 的协议兼容

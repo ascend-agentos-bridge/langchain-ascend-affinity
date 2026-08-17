@@ -143,7 +143,7 @@ endpoint lives.
 | What this library sends | Engine expectation | If missing / ignored |
 |---|---|---|
 | `cache_sharing: true` in the request body | opt the session into prefix-cache sharing | no gain, harmless |
-| `cache_salt: <session_id>` in the request body | vLLM-Ascend-style prefix-cache salt: same-salt sessions get an isolated KV bucket that LRU cannot evict for unrelated requests | falls back to the shared LRU bucket — no isolation, no gain |
+| `cache_salt: <session_id>` in the request body | vLLM-style prefix-cache salt: the salt is injected into the first block hash, giving same-salt sessions an isolated KV namespace that different-salt requests cannot reuse (eviction under memory pressure still follows engine policy) | falls back to the shared cache bucket — no isolation, no gain |
 | `POST {engine-root}/release_kv_cache` with `model`, `cache_salt`, `cache_sharing`, `messages`, `messages_released_index` (+ `tools`, `tools_released_index`) — only when the client detects a rewritten prefix | agent-core-compatible partial release: drop blocks from the released index, keep the valid prefix | `releases_failed` counter + warning; rewrite-heavy agent loops lose the release gain |
 
 **No session bound** — the model sends no affinity fields at all and stays
@@ -165,9 +165,16 @@ is content-hash based cross-session reuse, enabled server-side via
 cannot stack with function call (multiturn) + context/sequence parallel.
 On stock MindIE this library therefore degrades to "plain OpenAI client +
 engine-global prefix cache" (multi-turn agents still gain from common-prefix
-hits, but there is no session isolation or active release); the full affinity
-gain requires vLLM-Ascend salt semantics or a custom engine carrying the
-agent-hint patch. See the per-item mapping in section 1.4 of
+hits, but there is no session isolation or active release).
+
+**vLLM-Ascend status**: `cache_salt` is a native vLLM core request field
+(requires `--enable-prefix-caching`) and takes effect directly on
+vLLM-Ascend — same-salt reuse, different-salt isolation — making it the
+most convincing real-engine validation platform today. Note, however, that
+its semantics are an isolation namespace rather than a residency guarantee,
+and `/release_kv_cache` and `agent_hint` still do not exist. The full
+affinity gain depends on vLLM RFC #37168 landing or a custom engine
+carrying the agent-hint patch. See the per-item mapping in section 1.4 of
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
 
 
