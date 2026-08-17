@@ -227,3 +227,83 @@ class TestInferenceThenManage:
             "parent_session_id": "s1",
         }
         assert "context_management" not in payload["agent_hint"]
+
+
+class _FakeTimer:
+    """Deterministic stand-in for threading.Timer."""
+
+    def __init__(self, interval, fn, args=()):
+        self.interval = interval
+        self.fn = fn
+        self.args = args
+        self.started = False
+        self.cancelled = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class TestIdleAutoEvict:
+    def test_schedules_and_rearms_timer(self, chat_llm, mocker):
+        chat_llm.idle_evict_after_seconds = 5.0
+        chat_llm.enable_agent_hint = True
+        timers: list = []
+        mocker.patch(
+            "langchain_ascend.llms.chat_ascend.threading.Timer",
+            side_effect=lambda interval, fn, args=(): (
+                timers.append(_FakeTimer(interval, fn, args)) or timers[-1]
+            ),
+        )
+        _patch_post(chat_llm, mocker)
+        chat_llm.invoke([HumanMessage(content="hi")])
+        assert len(timers) == 1
+        assert timers[0].interval == 5.0
+        assert timers[0].args == ("fixture-session",)
+        assert timers[0].started is True
+
+        chat_llm.invoke([HumanMessage(content="hi")])
+        assert timers[0].cancelled is True
+        assert len(timers) == 2
+
+    def test_no_timer_when_disabled(self, chat_llm, mocker):
+        timers: list = []
+        mocker.patch(
+            "langchain_ascend.llms.chat_ascend.threading.Timer",
+            side_effect=lambda *a, **k: timers.append(_FakeTimer(*a, **k)) or timers[-1],
+        )
+        _patch_post(chat_llm, mocker)
+        chat_llm.invoke([HumanMessage(content="hi")])
+        assert not timers
+
+    def test_no_timer_without_agent_hint(self, chat_llm, mocker):
+        chat_llm.idle_evict_after_seconds = 5.0
+        timers: list = []
+        mocker.patch(
+            "langchain_ascend.llms.chat_ascend.threading.Timer",
+            side_effect=lambda *a, **k: timers.append(_FakeTimer(*a, **k)) or timers[-1],
+        )
+        _patch_post(chat_llm, mocker)
+        chat_llm.invoke([HumanMessage(content="hi")])
+        assert not timers
+
+    def test_timer_callback_evicts_session(self, mocker):
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", enable_agent_hint=True
+        )
+        post = _patch_post(model, mocker)
+        model._idle_evict_cb("s1")
+        payload = post.call_args[0][2]
+        assert payload["agent_hint"]["context_management"]["edits"] == [
+            {"type": "evict", "target": "session"}
+        ]
+
+    def test_timer_callback_failure_non_fatal(self, mocker):
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", enable_agent_hint=True
+        )
+        mocker.patch.object(model, "_post", side_effect=OSError("engine busy"))
+        model._idle_evict_cb("s1")  # must not raise
+        assert model.affinity_stats["management_failed"] == 1

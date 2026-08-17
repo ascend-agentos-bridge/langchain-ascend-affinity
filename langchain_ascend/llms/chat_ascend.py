@@ -42,6 +42,7 @@ import asyncio
 import functools
 import json
 import logging
+import threading
 import urllib.error
 import urllib.request
 from typing import Any, Dict, Iterator, List, Optional, Sequence
@@ -169,6 +170,13 @@ class AscendAffinityChatModel(BaseChatModel):
         "methods become available. Engines that ignore unknown fields "
         "degrade safely.",
     )
+    idle_evict_after_seconds: float = Field(
+        default=0.0,
+        description="Auto-evict the session's KV cache after this many "
+        "seconds of inactivity following a generation (0 = disabled). "
+        "Requires enable_agent_hint; each new call cancels and re-arms the "
+        "timer.",
+    )
     streaming: bool = Field(
         default=False,
         description="When True, invoke()/ainvoke() stream via SSE internally "
@@ -178,6 +186,8 @@ class AscendAffinityChatModel(BaseChatModel):
 
     _prefix_tracker: PrefixCacheTracker = PrivateAttr(default_factory=PrefixCacheTracker)
     _affinity_stats: Dict[str, int] = PrivateAttr(default_factory=_new_affinity_stats)
+    _idle_timer: Optional[threading.Timer] = PrivateAttr(default=None)
+    _idle_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     @property
     def _llm_type(self) -> str:
@@ -604,6 +614,42 @@ class AscendAffinityChatModel(BaseChatModel):
             **kwargs,
         )
 
+    # -- idle auto-evict -------------------------------------------------------------
+
+    def _cancel_idle_evict_locked(self) -> None:
+        """Cancel the pending idle timer (caller holds the lock)."""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _cancel_idle_evict(self) -> None:
+        """Cancel any pending idle-evict timer (safe when disabled)."""
+        with self._idle_lock:
+            self._cancel_idle_evict_locked()
+
+    def _schedule_idle_evict(self, session_id: Optional[str]) -> None:
+        """Arm the idle-evict timer after a generation, if configured."""
+        if not self.idle_evict_after_seconds or not session_id:
+            return
+        if not self.enable_agent_hint:
+            return
+        with self._idle_lock:
+            self._cancel_idle_evict_locked()
+            timer = threading.Timer(
+                self.idle_evict_after_seconds,
+                self._idle_evict_cb,
+                args=(session_id,),
+            )
+            timer.daemon = True
+            self._idle_timer = timer
+            timer.start()
+
+    def _idle_evict_cb(self, session_id: str) -> None:
+        """Timer callback: best-effort session evict (never raises)."""
+        with self._idle_lock:
+            self._idle_timer = None
+        self.evict_kvc(session_id=session_id)
+
     # -- response parsing ----------------------------------------------------------
 
     @staticmethod
@@ -714,9 +760,14 @@ class AscendAffinityChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        session_id = self._resolve_session_id(run_manager, kwargs)
+        self._cancel_idle_evict()
         if self.streaming:
-            return self._generate_from_stream(messages, stop, run_manager, kwargs)
-        return self._request(messages, stop, run_manager, kwargs)
+            result = self._generate_from_stream(messages, stop, run_manager, kwargs)
+        else:
+            result = self._request(messages, stop, run_manager, kwargs)
+        self._schedule_idle_evict(session_id)
+        return result
 
     async def _agenerate(
         self,
