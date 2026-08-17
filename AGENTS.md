@@ -36,6 +36,6 @@
 ## Git 规范
 
 - 提交严格遵循 Conventional Commits（`feat:` / `fix:` / `docs:` / `test:` / `chore:` / `refactor:`）。
-- 远端仓库：https://github.com/tianxiaoliang/langchain-ascend-affinity（分支 `main`）。
+- 远端仓库：https://github.com/ascend-agentos-bridge/langchain-ascend-affinity（分支 `main`）。
 - 本机经公司代理 + 自签证书环境，push 时使用单次命令 `git -c http.sslVerify=false push`（勿修改全局 SSL 配置）。
 - 绝不提交任何 Token / 密钥；Token 若已写入 `.git/config`，交付后提示用户清除。

@@ -1,12 +1,12 @@
 [tool.poetry]
 name = "langchain-ascend-affinity"
-version = "0.1.0"
-description = "Non-intrusive Ascend compute-affinity plugin for LangChain: proactive KV-Cache offload, prefetch and eviction via Agent Hint to cut TTFT in multi-agent scenarios."
+version = "0.2.0"
+description = "Non-intrusive Ascend compute-affinity for LangChain: cache_salt session binding + prefix-diff scheduling + partial KV-Cache release to cut TTFT and cost on Ascend engines."
 authors = ["tianxiaoliang <tianxiaoliang@users.noreply.github.com>"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/tianxiaoliang/langchain-ascend-affinity"
-keywords = ["langchain", "ascend", "npu", "kv-cache", "agent-hint", "ttft", "llm"]
+repository = "https://github.com/ascend-agentos-bridge/langchain-ascend-affinity"
+keywords = ["langchain", "ascend", "npu", "kv-cache", "ttft", "llm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -25,11 +25,6 @@ packages = [{ include = "langchain_ascend" }]
 python = ">=3.9,<4.0"
 langchain-core = ">=1.0.0,<2.0.0"
 pydantic = ">=2.0.0,<3.0.0"
-
-[tool.poetry.extras]
-torch_npu = ["torch", "torch-npu"]
-mindspore = ["mindspore"]
-cann = ["pyacl", "acllite"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"
