@@ -17,6 +17,10 @@ Each affinity agent is judged **only against its same-framework baseline**
 (single variable per pair). `--agents all|lc|oj|<comma list>` selects a
 subset.
 
+For how compute affinity works, how this benchmark proves it, and common
+questions (shared API key, cross-contamination, round count...), see
+[PRINCIPLES.md](PRINCIPLES.md) (Chinese).
+
 ## Quick start
 
 ```bash

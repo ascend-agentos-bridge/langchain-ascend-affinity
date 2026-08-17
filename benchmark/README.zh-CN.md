@@ -15,6 +15,10 @@
 每个亲和 Agent **只与同框架的 baseline 对比**（每对单一变量）。
 `--agents all|lc|oj|<逗号列表>` 可选择子集。
 
+算力亲和的原理、本基准测试如何证明其有效、以及常见疑问
+（API key 共用、缓存交叉污染、轮次选择等），见
+[PRINCIPLES.md](PRINCIPLES.md)。
+
 ## 快速开始
 
 ```bash
