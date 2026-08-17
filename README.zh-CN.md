@@ -150,7 +150,7 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 （release 端点探测、`affinity_stats`、疑似假亲和警报）——见
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md)。
 
-**MindIE 现状**（对照 MindIE 3.0.0 公开文档，2026-08）：公开
+**MindIE 现状**（全版本 ≤ 3.1.0，2026-08 核对）：公开
 RESTful 接口未提供逐请求 `cache_salt`、`/release_kv_cache` 端点或
 `agent_hint` 字段；其 Prefix Cache 为内容哈希跨会话复用，需在服务端
 `config.json` 配置 `plugin_params: {"plugin_type":"prefix_cache"}` 开启，
@@ -159,11 +159,17 @@ RESTful 接口未提供逐请求 `cache_salt`、`/release_kv_cache` 端点或
 前缀缓存"（多轮 agent 仍有公共前缀命中收益，但无会话隔离与主动释放）。
 
 **vLLM-Ascend 现状**：`cache_salt` 是 vLLM 核心原生请求字段
-（需 `--enable-prefix-caching`），在 vLLM-Ascend 上直接生效——同
-salt 复用、异 salt 隔离，是当前最有说服力的真机验证平台；但注意其
-语义是隔离命名空间而非驻留保证，且 `/release_kv_cache` 与
-`agent_hint` 仍不存在。完整亲和收益依赖 vLLM RFC #37168 落地或
-带 agent-hint 补丁的定制引擎。逐项对照表见
+（v0.9.0 起，需开启 prefix caching），vLLM-Ascend **≥ v0.9.1** 起
+全系透传并直接生效——同 salt 复用、异 salt 隔离，是当前最有说服力的
+真机验证平台；但注意其语义是隔离命名空间而非驻留保证，且
+`/release_kv_cache` 仅存在于 **open 状态的 vllm-ascend PR #6722**
+（基于 vLLM v0.15 验证，未合入任何官方 release），`agent_hint` 公开
+引擎无一实现。完整亲和收益依赖 PR #6722 合入、vLLM RFC #37168 落地
+或带 agent-hint 补丁的定制引擎。
+
+逐引擎版本 × 逐机制的支持矩阵、不匹配时哪些收益失效、以及 LLM 网关
+（LiteLLM / Higress / One API 等）能否透传亲和字段，统一维护在
+[COMPATIBILITY.zh-CN.md](COMPATIBILITY.zh-CN.md)；判定纪律见
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md) 1.4 节。
 
 

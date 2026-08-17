@@ -158,8 +158,8 @@ as a plain OpenAI client. The benchmark makes the engine's actual behaviour
 visible (release-endpoint probe, `affinity_stats`, suspected-false-affinity
 alert) — see [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
 
-**MindIE status** (checked against MindIE 3.0.0 public docs, 2026-08):
-the public RESTful surface exposes no per-request `cache_salt`, no
+**MindIE status** (all versions ≤ 3.1.0, checked 2026-08): the
+public RESTful surface exposes no per-request `cache_salt`, no
 `/release_kv_cache` endpoint and no `agent_hint` field; its Prefix Cache
 is content-hash based cross-session reuse, enabled server-side via
 `plugin_params: {"plugin_type":"prefix_cache"}` in `config.json`, and
@@ -169,13 +169,21 @@ engine-global prefix cache" (multi-turn agents still gain from common-prefix
 hits, but there is no session isolation or active release).
 
 **vLLM-Ascend status**: `cache_salt` is a native vLLM core request field
-(requires `--enable-prefix-caching`) and takes effect directly on
-vLLM-Ascend — same-salt reuse, different-salt isolation — making it the
-most convincing real-engine validation platform today. Note, however, that
-its semantics are an isolation namespace rather than a residency guarantee,
-and `/release_kv_cache` and `agent_hint` still do not exist. The full
-affinity gain depends on vLLM RFC #37168 landing or a custom engine
-carrying the agent-hint patch. See the per-item mapping in section 1.4 of
+(since v0.9.0; requires prefix caching enabled) and takes effect directly
+on vLLM-Ascend **≥ v0.9.1** — same-salt reuse, different-salt isolation —
+making it the most convincing real-engine validation platform today. Note,
+however, that its semantics are an isolation namespace rather than a
+residency guarantee; `/release_kv_cache` exists only in the **open (unmerged)
+vllm-ascend PR #6722** (validated on vLLM v0.15.0), and `agent_hint` has no
+public engine implementation. The full affinity gain depends on PR #6722
+merging, vLLM RFC #37168 landing, or a custom engine carrying the
+agent-hint patch.
+
+The per-engine-version × per-mechanism support matrix, the
+benefit-invalidation analysis on mismatch, and whether LLM gateways
+(LiteLLM / Higress / One API, etc.) pass affinity fields through are
+maintained in [COMPATIBILITY.md](COMPATIBILITY.md); the evidence
+discipline lives in section 1.4 of
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
 
 

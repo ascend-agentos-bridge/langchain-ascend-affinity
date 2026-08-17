@@ -87,14 +87,16 @@ baseline 只能让引擎留着一整段脏缓存，亲和路径则精确释放�
 
 ### 1.4 主流引擎现状对照（MindIE 3.0.0 公开文档 / vLLM-Ascend v0.23）
 
-本库依赖的接口在两类引擎侧的落地情况（核对时间 2026-08）：
+本库依赖的接口在两类引擎侧的落地情况（核对时间 2026-08；逐版本匹配
+列表、失效收益分析与 LLM 网关透传矩阵见根目录
+[COMPATIBILITY.zh-CN.md](../COMPATIBILITY.zh-CN.md)）：
 
 | 依赖 | MindIE 3.0.0（公开接口） | vLLM-Ascend（≥ v0.9.1） |
 |---|---|---|
 | `POST /v1/chat/completions` / `GET /v1/models` / `GET /metrics` | ✅ 支持。另有 `GET /metrics-json`：直接输出 TTFT/TBT 动态均值、执行/等待请求数、剩余 NPU block 数 | ✅ 支持（vLLM 原生 `/metrics` 含 prefix-cache hit 计数） |
-| `cache_salt` 逐请求会话隔离 | ❌ 无此请求字段。Prefix Cache 为**内容哈希**跨会话复用，经服务端 `config.json` 的 `plugin_params: {"plugin_type":"prefix_cache"}` 开启 | ✅ **vLLM 核心原生字段**（chat/completions、completions、responses 三个端点均接受）。salt 注入首块哈希 → 同 salt 复用、异 salt 隔离。需服务端 `--enable-prefix-caching` |
-| `POST /release_kv_cache` 部分释放 | ❌ 公开 RESTful 清单无此端点 | ❌ 无（vLLM RFC #37168 提案中：主动失效 + 会话引用计数 + Aging/Fresh 双区调度，未合入任何版本） |
-| `agent_hint` 生命周期字段 | ❌ 公开文档无此字段（openJiuwen×昇腾联合特性，需定制版引擎） | ❌ 无（不在 vLLM 生态路线） |
+| `cache_salt` 逐请求会话隔离 | ❌ 无此请求字段。Prefix Cache 为**内容哈希**跨会话复用，经服务端 `config.json` 的 `plugin_params: {"plugin_type":"prefix_cache"}` 开启 | ✅ **vLLM 核心原生字段**（v0.9.0 起，chat/completions、completions、responses 三个端点均接受）。salt 注入首块哈希 → 同 salt 复用、异 salt 隔离。需开启 prefix caching（v0.9.1 起官方支持） |
+| `POST /release_kv_cache` 部分释放 | ❌ 公开 RESTful 清单无此端点 | ❌ 无。唯一实现在 **open 状态的 vllm-ascend PR #6722**（基于 vLLM v0.15 验证，未合入任何官方 release）；vLLM RFC #37168（主动失效 + 会话引用计数 + Aging/Fresh 双区调度）仍在提案中 |
+| `agent_hint` 生命周期字段 | ❌ 公开文档无此字段（openJiuwen×昇腾联合特性，需定制版引擎） | ❌ 无。联调对象为华为内部自研 vLLM，公开生态不可复现 |
 
 **一个关键的语义辨析**：vLLM 的 `cache_salt` 本质是**隔离命名空间**
 （官方动机是多租户防串缓存/防时序攻击），不是"钉住不被驱逐"——显存
