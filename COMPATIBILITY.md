@@ -51,18 +51,14 @@ gradient:
 > agent_hint protocol opt-in (`enable_agent_hint`), field-aligned with the
 > develop branch.
 
-### 2.2 Engine capability × version matrix
+### 2.2 Engine capability → supported versions (supported only, one representative each)
 
-| Engine / version | `cache_salt` | `cache_sharing` | `/release_kv_cache` | `agent_hint` |
-|---|---|---|---|---|
-| vLLM v0.8.x and earlier | ❌ | ❌ | ❌ | ❌ |
-| vLLM ≥ v0.9.0 (→ current) | ✅ (PR #17045; `/v1/responses` added later) | ⚠️ accepted via extra=allow, ignored | ❌ (RFC #37168 in proposal) | ❌ |
-| vLLM-Ascend v0.7.3 | ❌ (vLLM v0.7.3 lacks the field) | ❌ | ❌ | ❌ |
-| vLLM-Ascend ≥ v0.9.1 (→ v0.23+/main, all releases) | ✅ (inherited from the vLLM frontend; requires prefix caching enabled — officially supported since v0.9.1) | ⚠️ ignored | ❌ | ❌ |
-| vLLM-Ascend v0.15 + **PR #6722 plugin** (Open, unmerged) | ✅ | ✅ | ✅ | ❌ (the plugin implements the release protocol, not agent_hint) |
-| Huawei-internal vLLM (not public) | ? | ? | ? | ✅ (the only agent_hint joint-debug target) |
-| MindIE 2.x / 3.0.0 / 3.1.0 | ❌ | ❌ | ❌ | ❌ |
-| SGLang (incl. Ascend backend) | ❌ (no per-request salt) | ❌ | ⚠️ full flush `/flush_cache` only | ⚠️ Dynamo-layer `nvext.agent_hints` + Session Control only (experimental) |
+| Capability | Supporting engine / version |
+|---|---|
+| `cache_salt` | vLLM ≥ v0.9.0 (PR #17045; inherited by all vLLM-Ascend ≥ v0.9.1, requires prefix caching enabled) |
+| `cache_sharing` + `/release_kv_cache` | only vLLM-Ascend v0.15 + PR #6722 plugin (Open, unmerged) |
+| `agent_hint` | only the Huawei-internal vLLM (not public) |
+| Full KV flush / agent hints (reference) | SGLang `/flush_cache`; NVIDIA Dynamo `nvext.agent_hints` + Session Control (experimental, not this library's protocol) |
 
 ### 2.3 Working combinations (the "matching list")
 

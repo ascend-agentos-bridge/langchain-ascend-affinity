@@ -43,18 +43,14 @@
 > 本库 `AscendAffinityChatModel` 同时实现两条协议：release 协议默认开启，
 > agent_hint 协议 opt-in（`enable_agent_hint`），字段级对齐 develop 分支。
 
-### 2.2 引擎能力 × 版本矩阵
+### 2.2 引擎能力 → 支持版本（只列支持的，每项一个代表版本）
 
-| 引擎 / 版本 | `cache_salt` | `cache_sharing` | `/release_kv_cache` | `agent_hint` |
-|---|---|---|---|---|
-| vLLM v0.8.x 及更早 | ❌ | ❌ | ❌ | ❌ |
-| vLLM ≥ v0.9.0（→ 当前） | ✅（PR #17045；`/v1/responses` 后补齐） | ⚠️ extra=allow 接受但忽略 | ❌（RFC #37168 提案中） | ❌ |
-| vLLM-Ascend v0.7.3 | ❌（vLLM v0.7.3 无此字段） | ❌ | ❌ | ❌ |
-| vLLM-Ascend ≥ v0.9.1（→ v0.23+/main，全系） | ✅（随 vLLM 前端透传；需开启 prefix caching，v0.9.1 起官方支持） | ⚠️ 忽略 | ❌ | ❌ |
-| vLLM-Ascend v0.15 + **PR #6722 插件**（Open，未合入） | ✅ | ✅ | ✅ | ❌（插件实现的是 release 协议，不消费 agent_hint） |
-| 华为内部自研 vLLM（不公开） | ？ | ？ | ？ | ✅（agent_hint 唯一联调对象） |
-| MindIE 2.x / 3.0.0 / 3.1.0 | ❌ | ❌ | ❌ | ❌ |
-| SGLang（含 Ascend 后端） | ❌（无请求级 salt） | ❌ | ⚠️ 仅全量 `/flush_cache` | ⚠️ 仅 Dynamo 编排层 `nvext.agent_hints` + Session Control（实验） |
+| 能力 | 支持的引擎 / 版本 |
+|---|---|
+| `cache_salt` | vLLM ≥ v0.9.0（PR #17045；vLLM-Ascend ≥ v0.9.1 全系继承，需开启 prefix caching） |
+| `cache_sharing` + `/release_kv_cache` | 仅 vLLM-Ascend v0.15 + PR #6722 插件（Open 未合入） |
+| `agent_hint` | 仅华为内部自研 vLLM（不公开） |
+| 全量 KV 释放 / agent 提示（参考） | SGLang `/flush_cache`；NVIDIA Dynamo `nvext.agent_hints` + Session Control（实验，非本库协议） |
 
 ### 2.3 可行组合（"匹配列表"）
 
