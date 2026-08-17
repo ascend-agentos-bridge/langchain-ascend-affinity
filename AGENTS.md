@@ -39,3 +39,17 @@
 - 远端仓库：https://github.com/ascend-agentos-bridge/langchain-ascend-affinity（分支 `main`）。
 - 本机经公司代理 + 自签证书环境，push 时使用单次命令 `git -c http.sslVerify=false push`（勿修改全局 SSL 配置）。
 - 绝不提交任何 Token / 密钥；Token 若已写入 `.git/config`，交付后提示用户清除。
+## 架构裁决（2026-08 修订）
+
+- **否决（保持）**：v0.1 的实现形态——`callbacks/`（AscendAffinityCallbackHandler）、
+  `backends/`（offload/prefetch/evict 适配器）、独立 `/agent-hints` 端点。
+  任何新代码不得复活回调接线或后端适配器形态。
+- **演进（2026-08 P1 决议）**：openjiuwen agent-core 于 2026-07 合入的
+  `agent_hint` 生命周期协议（`session_id`/`parent_session_id` +
+  `context_management` 的 `evict/offload/prefetch`）为本项目演进方向，
+  按「阶段 A 协议对齐（身份字段 + 管理方法，opt-in）→ 阶段 B 模型内自动
+  调度 → 真机验证」分阶段引入。协议构造须与 agent-core
+  `AscendAffinityModelClient` 保持字段级一致；引擎不支持时未知字段被忽略，
+  必须安全降级（非致命、可观测）。
+- **评审时**：以本节约束为准；与 openjiuwen agent-core 的协议兼容性
+  （字段、URL、序列化）逐项核对，发现漂移即提出修复。

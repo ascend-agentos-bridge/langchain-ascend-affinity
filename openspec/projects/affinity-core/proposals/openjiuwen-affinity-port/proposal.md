@@ -55,3 +55,20 @@ LangChain equivalent of agent-core's `InferenceAffinityModelClient` +
   the model class replaces `AscendChatLLM` (same constructor shape plus
   affinity defaults).
 - No new runtime dependencies (stdlib HTTP + langchain-core).
+
+## 2026-08 Amendment（P1 决议）
+
+- **否决范围收窄**：本提案对 `callbacks/`、`backends/`、独立 `/agent-hints`
+  端点的否决保留；对 "offload/prefetch/evict 能力" 与 "inline agent_hint
+  字段" 的否决撤销——前提已变化：openjiuwen agent-core 于 2026-07-22
+  （commit 63380f17e8）将 `agent_hint` 生命周期协议（`session_id` /
+  `parent_session_id` + `context_management` 的 `evict/offload/prefetch`）
+  作为一等协议合入，普通推理与管理请求共用 `/v1/chat/completions`。
+- **分阶段引入**：
+  1. 阶段 A（2026-08）：`AscendAffinityChatModel` 支持 `enable_agent_hint`
+     （默认 False）注入身份字段，并暴露与 agent-core 同名同语义的管理方法
+     `evict_kvc / offload_kvc / prefetch_kvc`；管理动作默认关闭，失败非致命。
+  2. 阶段 B（待真机验证）：模型内自动调度策略 + benchmark 成本侧指标
+     （KV cache usage peak / HBM / 并发容量）。
+- **兼容纪律**：协议构造与 agent-core `AscendAffinityModelClient` 字段级
+  一致；引擎不支持时安全降级，可观测（计数/告警），不中断生成。
