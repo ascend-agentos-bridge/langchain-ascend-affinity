@@ -89,6 +89,17 @@ class TestAggregate:
         assert median.e2e_mean_ms == 2000.0
         assert median.llm_calls == 1
 
+    def test_median_averages_token_totals(self):
+        rounds = [
+            aggregate([_call(100.0, 1000.0, prompt=100, completion=40)]),
+            aggregate([_call(200.0, 2000.0, prompt=150, completion=50)]),
+            aggregate([_call(300.0, 3000.0, prompt=200, completion=60)]),
+        ]
+        median = median_metrics(rounds)
+        assert median.prefill_tokens == 150  # (100+150+200)/3
+        assert median.decode_tokens == 50    # (40+50+60)/3
+        assert median.llm_calls == 1
+
 
 class TestVerdicts:
     def test_ttft_pass_on_drop(self):

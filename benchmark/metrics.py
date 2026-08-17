@@ -121,7 +121,7 @@ def aggregate(calls: List[CallMetrics]) -> AgentMetrics:
 
 
 def median_metrics(per_round: List[AgentMetrics]) -> AgentMetrics:
-    """Cross-round median of every numeric field (token totals keep sums)."""
+    """Cross-round median of per-call metrics; token totals take the mean."""
     if not per_round:
         return AgentMetrics()
     if len(per_round) == 1:
@@ -138,8 +138,16 @@ def median_metrics(per_round: List[AgentMetrics]) -> AgentMetrics:
         "kv_hit_rate",
     ]
     data = asdict(per_round[0])
-    data["llm_calls"] = sum(m.llm_calls for m in per_round) // len(per_round)
-    data["streamed_calls"] = sum(m.streamed_calls for m in per_round) // len(per_round)
+    data["llm_calls"] = round(sum(m.llm_calls for m in per_round) / len(per_round))
+    data["streamed_calls"] = round(
+        sum(m.streamed_calls for m in per_round) / len(per_round)
+    )
+    data["prefill_tokens"] = round(
+        sum(m.prefill_tokens for m in per_round) / len(per_round)
+    )
+    data["decode_tokens"] = round(
+        sum(m.decode_tokens for m in per_round) / len(per_round)
+    )
     for name in fields:
         values = [getattr(m, name) for m in per_round if getattr(m, name) is not None]
         data[name] = round(statistics.median(values), 2) if values else None
