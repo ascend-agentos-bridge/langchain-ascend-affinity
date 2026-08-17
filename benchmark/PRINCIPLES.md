@@ -85,44 +85,28 @@ baseline 只能让引擎留着一整段脏缓存，亲和路径则精确释放�
 > 降级行为）见根 README 的"引擎接口要求"与"协议兼容"小节，测试侧的
 > 探测项与限流约束见 benchmark README 的"引擎接口要求"小节。
 
-### 1.4 主流引擎现状对照（MindIE 3.0.0 公开文档 / vLLM-Ascend v0.23）
+### 1.4 主流引擎现状对照
 
-本库依赖的接口在两类引擎侧的落地情况（核对时间 2026-08；逐版本匹配
-列表、失效收益分析与 LLM 网关透传矩阵见根目录
-[COMPATIBILITY.zh-CN.md](../COMPATIBILITY.zh-CN.md)）：
+引擎能力 × 版本匹配列表、不匹配时的收益失效分析、LLM 网关透传矩阵，
+**唯一权威版本**维护在根目录
+[COMPATIBILITY.zh-CN.md](../COMPATIBILITY.zh-CN.md)（本节只保留读报告
+所需的最小事实，不复制细节，以该文档为准）。要点（2026-08 核对）：
 
-| 依赖 | MindIE 3.0.0（公开接口） | vLLM-Ascend（≥ v0.9.1） |
-|---|---|---|
-| `POST /v1/chat/completions` / `GET /v1/models` / `GET /metrics` | ✅ 支持。另有 `GET /metrics-json`：直接输出 TTFT/TBT 动态均值、执行/等待请求数、剩余 NPU block 数 | ✅ 支持（vLLM 原生 `/metrics` 含 prefix-cache hit 计数） |
-| `cache_salt` 逐请求会话隔离 | ❌ 无此请求字段。Prefix Cache 为**内容哈希**跨会话复用，经服务端 `config.json` 的 `plugin_params: {"plugin_type":"prefix_cache"}` 开启 | ✅ **vLLM 核心原生字段**（v0.9.0 起，chat/completions、completions、responses 三个端点均接受）。salt 注入首块哈希 → 同 salt 复用、异 salt 隔离。需开启 prefix caching（v0.9.1 起官方支持） |
-| `POST /release_kv_cache` 部分释放 | ❌ 公开 RESTful 清单无此端点 | ❌ 无。唯一实现在 **open 状态的 vllm-ascend PR #6722**（基于 vLLM v0.15 验证，未合入任何官方 release）；vLLM RFC #37168（主动失效 + 会话引用计数 + Aging/Fresh 双区调度）仍在提案中 |
-| `agent_hint` 生命周期字段 | ❌ 公开文档无此字段（openJiuwen×昇腾联合特性，需定制版引擎） | ❌ 无。联调对象为华为内部自研 vLLM，公开生态不可复现 |
+- `cache_salt`：vLLM ≥ v0.9.0 / vLLM-Ascend ≥ v0.9.1 原生生效；语义是
+  **隔离命名空间**而非驻留保证——显存压力下全局 LRU 照样逐出。
+- `/release_kv_cache`：所有官方 release 均无；唯一实现在 open 状态的
+  vllm-ascend PR #6722（未合入）。
+- `agent_hint`：公开引擎零实现（联调对象为华为内部自研 vLLM）。
+- MindIE 全版本（≤ 3.1.0）：无 salt、无 release、无 agent_hint；其
+  Prefix Cache 插件为内容哈希跨会话复用，且有叠加约束（不能与
+  function call(multiturn)、context+sequence parallel 叠加）——工具
+  调用型 agent 可能连公共前缀命中都拿不到。
 
-**一个关键的语义辨析**：vLLM 的 `cache_salt` 本质是**隔离命名空间**
-（官方动机是多租户防串缓存/防时序攻击），不是"钉住不被驱逐"——显存
-不足时全局 LRU 照样逐出 salt 桶里的块。因此在 vLLM-Ascend 上：
-salt 生效 → 同会话跨轮命中 ↑、prefill ↓（**这部分收益真实可测**）；
-但工具调用间隙的"驻留保护"仍靠 LRU 运气。主动驱逐/钉住/预取正是
-RFC #37168 与 agent_hint 要补的缺口。
-
-MindIE Prefix Cache 的叠加约束（直接影响 agent 场景）：不支持
-prefix cache 与 context parallel + sequence parallel +
-function call(multiturn) 叠加；与 Multi-LoRA、SplitFuse+数据并行
-互斥；复用按 block 粒度（blocksize 的整数倍）；模型限 Qwen2/2.5/3、
-DeepSeek-R1/V3 系列。
-
-**实际含义（按真机验证平台排序）**：
-
-- **vLLM-Ascend（契约 3/4：chat + salt + metrics）**——salt 真实
-  生效，benchmark 中 affinity 配对的命中率/prefill 应可见差异；
-  release 计数失败属预期。
-- **存量 MindIE（契约 1/4：仅内容哈希缓存）**——亲和字段被安全忽略，
-  多轮 agent 的公共前缀仍可命中拿到部分 TTFT 收益，但无会话隔离、
-  无主动释放，`affinity_stats` 显示 salt 未生效。
-- **完整算力亲和（4/4）**——需要带 agent-hint 补丁的定制引擎。
-
-这正是本基准测试要区分的三种结果：**真亲和 / 部分收益（纯前缀
-缓存）/ 假亲和**。
+对读报告的含义：**vLLM-Ascend ≥ 0.9.1 = 契约 3/4**（chat + salt +
+metrics），release 404、`releases_failed` 增长属预期，不代表 salt 失效；
+**存量 MindIE = 契约 1/4**，salt 绑定为 0 属预期；**4/4 完整亲和**需带
+补丁的定制引擎。这正是本基准测试要区分的三种结果：**真亲和 / 部分收益
+（纯前缀缓存）/ 假亲和**。
 
 ---
 
@@ -269,22 +253,20 @@ python benchmark/run_benchmark.py --setup \
 
 **Q9：在存量 MindIE 上跑，能看到多少收益？**
 
-公开版 MindIE 3.0.0 未暴露 `cache_salt` / `/release_kv_cache` /
-`agent_hint`（见 1.4 对照表），亲和请求退化为普通请求 + 引擎全局
-内容哈希前缀缓存：多轮 agent 的公共前缀（系统提示词、工具定义、
-早期历史）仍可命中，能拿到部分 TTFT 收益；但无会话隔离、无主动
-释放。报告中 salt 绑定与 release 指标为 0/失败属预期行为，不代表
-本库故障——引擎侧若开启了 Prefix Cache 插件，可对照
-`--metrics-url` 的命中率变化验证这部分收益。
+MindIE 全版本不支持任何亲和字段（能力矩阵与失效分析见
+[COMPATIBILITY.zh-CN.md](../COMPATIBILITY.zh-CN.md)），亲和请求退化为
+普通请求 + 引擎全局内容哈希前缀缓存：多轮 agent 的公共前缀（系统
+提示词、工具定义、早期历史）仍可命中，能拿到部分 TTFT 收益；但无
+会话隔离、无主动释放。报告中 salt 绑定与 release 指标为 0/失败属
+预期行为，不代表本库故障——引擎侧若开启了 Prefix Cache 插件，可
+对照 `--metrics-url` 的命中率变化验证这部分收益。
 
 **Q10：在 vLLM-Ascend 上跑呢？salt 不是原生字段吗？**
 
-是——`cache_salt` 是 vLLM 核心原生请求字段（三个 OpenAI 兼容端点
-都接受），vLLM-Ascend 复用 vLLM v1 调度器，salt 直接生效（需
-`--enable-prefix-caching`）。因此 affinity 配对的 KV 命中率与
-prefill tokens 指标应能看到真实差异，这是当前**最有说服力的真机
-验证平台**。但注意两点：其一，vLLM 的 salt 语义是**隔离命名空间**
-（同 salt 才能复用），不是驻留保证——显存压力下 LRU 照样逐出，
-"钉住"要等 RFC #37168 或 agent_hint 落地；其二，`/release_kv_cache`
-不存在，`releases_failed` 计数持续增长属预期，报告中 release 相关
-行会呈现 ➖/FAIL，不代表 salt 失效。
+是——支持版本门槛与语义辨析（隔离命名空间，非驻留保证）见
+[COMPATIBILITY.zh-CN.md](../COMPATIBILITY.zh-CN.md)。在达标的
+vLLM-Ascend 上，affinity 配对的 KV 命中率与 prefill tokens 指标应能
+看到真实差异，这是当前**最有说服力的真机验证平台**。但 `/release_kv_cache`
+不存在，`releases_failed` 计数持续增长属预期，报告中 release 相关行
+会呈现 ➖/FAIL，不代表 salt 失效；"钉住/主动驱逐"要等 RFC #37168 或
+agent_hint 落地。

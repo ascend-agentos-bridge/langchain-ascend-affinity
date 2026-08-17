@@ -8,6 +8,20 @@
   - 新增或移除公开导出（`__all__`）
 - 两份 README 内容必须保持同步（仅语言不同），顶部保留语言切换行 `[English](README.md) | [简体中文](README.zh-CN.md)`。
 
+## 文档一致性（重要）
+
+- **单一事实源**：引擎能力 × 支持版本匹配列表、收益失效分析、LLM 网关
+  透传矩阵的**唯一权威版本**是 `COMPATIBILITY.md` / `COMPATIBILITY.zh-CN.md`
+  （两份同步，仅语言不同）。其他 md（根 README 双语、`benchmark/PRINCIPLES.md`、
+  `benchmark/README*.md`）只做一句话要点简述并链接，**不得复制细节表格或
+  版本号清单**，防止多份拷贝漂移。
+- **任何 md 文件修改后，必须通看项目内全部 md 文件**（根 README 双语、
+  COMPATIBILITY 双语、`benchmark/README*.md`、`benchmark/PRINCIPLES.md`、
+  `AGENTS.md`、`REQUIREMENTS.md`、`openspec/` 下的 md），核对：
+  - 交叉引用链接是否有效、指向是否仍是"唯一权威版本"；
+  - 事实陈述（版本号、PR/RFC 状态、字段语义）是否与 COMPATIBILITY 一致；
+  - 双语文件之间内容是否同步。发现漂移立即修复后才能提交。
+
 ## 工程命令
 
 - 单元测试：`python -m pytest tests/unit_tests`
