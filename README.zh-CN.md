@@ -110,6 +110,7 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 | `session_id` | `None` | 未逐调用绑定会话时的兜底 salt（仅单会话应用建议使用） |
 | `enable_affinity` | `True` | `False` = 普通 OpenAI 兼容客户端 |
 | `release_endpoint` | `/release_kv_cache` | 部分释放路径；置 `""` 禁用 |
+| `enable_agent_hint` | `False` | 可选启用 agent_hint 生命周期协议（见下文） |
 | `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | 常规请求选项 |
 
 每次调用的会话解析顺序：逐调用 / `bind(session_id=...)` 参数 → 运行
@@ -147,6 +148,22 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 模型作为普通 OpenAI 客户端照常工作。引擎的实际行为由基准测试显式暴露
 （release 端点探测、`affinity_stats`、疑似假亲和警报）——见
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md)。
+
+
+## 与 openjiuwen agent-core 的协议兼容
+
+本库跟踪 [openjiuwen agent-core](https://github.com/openJiuwen-ai/agent-core)
+的亲和协议，并在每次维护巡检时对照其亲和相关提交核验。
+
+| 协议 | 客户端发送内容 | 本库状态 |
+|---|---|---|
+| **release（默认）** | 每次绑定会话的请求携带 `cache_sharing: true` + `cache_salt: <session_id>`；检测到历史改写时 `POST {engine-root}/release_kv_cache`，携带 `model` / `cache_salt` / `cache_sharing` / `messages` / `messages_released_index`（及可选 `tools` / `tools_released_index`） | 与 agent-core `InferenceAffinityModelClient.release()` 字节兼容；前缀差异调度自动完成 |
+| **agent_hint 生命周期（阶段 A，可选）** | 聊天请求携带 `agent_hint: {session_id, parent_session_id}` 身份字段；`evict_kvc` / `offload_kvc` / `prefetch_kvc` 管理方法发送 `context_management: {manage_request: true, edits: [{type, target, start, end}]}` | 与 agent-core `AscendAffinityModelClient`（2026-07 `63380f17e8`）字段级一致；管理动作默认**关闭**（设 `enable_agent_hint=True` 启用） |
+
+两条协议都安全降级：忽略未知字段的引擎会把请求当作普通 OpenAI 调用；
+管理请求失败仅记录/计数，绝不致命。新生命周期协议按阶段引入——先做
+身份字段与显式管理，模型内自动调度须待真实引擎证据（判定纪律见
+`benchmark/PRINCIPLES.md`）。
 
 ## 验证
 
