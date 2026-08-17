@@ -126,6 +126,10 @@ multi-session services — propagates through agents/graphs) → constructor
 `AscendAffinityChatModel` works with any OpenAI-compatible engine, but the
 affinity gain is conditional on the following interface contract.
 
+Notation: `base_url` is the OpenAI-compatible base (e.g. `http://host:8000/v1`);
+`engine-root` is the same origin without the `/v1` suffix, where the release
+endpoint lives.
+
 **Required baseline (works everywhere)**
 
 | Interface | Requirement |

@@ -61,10 +61,14 @@ Options:
 At start the runner probes the engine and prints the verdict
 (`model_listed / release_endpoint / streaming`). What each probe needs:
 
+Notation: `{base_url}` is the OpenAI-compatible base URL (`--engine-url`, `/v1`
+appended if missing); `{engine-root}` is the same origin without `/v1` (see the
+[root README contract](../README.md#engine-interface-requirements)).
+
 | Probe | Endpoint | Blocks the run? |
 |---|---|---|
-| reachability | `GET {engine-url}/models` (any HTTP 200) | **yes** — exits with guidance |
-| model list | `GET {engine-url}/models` returning `data[].id` | no — `model_listed=False` is printed; the run continues |
+| reachability | `GET {base_url}/models` (any HTTP 200) | **yes** — exits with guidance |
+| model list | `GET {base_url}/models` returning `data[].id` | no — `model_listed=False` is printed; the run continues |
 | streaming | `POST /chat/completions` with `stream: true` (SSE `data:` frames) | no — but lc-pair TTFT degrades |
 | partial release | `POST {engine-root}/release_kv_cache` (404/405 = absent) | no — affinity release gain is lost, visible in `affinity_stats` |
 

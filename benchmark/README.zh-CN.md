@@ -58,10 +58,13 @@ python benchmark/run_benchmark.py
 开跑前脚本会探测引擎并打印结果（`model_listed / release_endpoint /
 streaming`）。各探测项对引擎的要求：
 
+符号约定：`{base_url}` 为 OpenAI 兼容基址（`--engine-url`，缺 `/v1` 时自动
+补上）；`{engine-root}` 为去掉 `/v1` 的同源地址（见[根 README 契约](../README.zh-CN.md#引擎接口要求)）。
+
 | 探测项 | 端点 | 不满足的后果 |
 |---|---|---|
-| 可达性 | `GET {engine-url}/models`（任意 HTTP 200） | **直接退出**并给出指引 |
-| 模型列表 | `GET {engine-url}/models`，返回 `data[].id` | 不阻断——打印 `model_listed=False` 后继续运行 |
+| 可达性 | `GET {base_url}/models`（任意 HTTP 200） | **直接退出**并给出指引 |
+| 模型列表 | `GET {base_url}/models`，返回 `data[].id` | 不阻断——打印 `model_listed=False` 后继续运行 |
 | 流式 | `POST /chat/completions` 带 `stream: true`（SSE `data:` 帧） | 不阻断，但 lc 配对的 TTFT 失效 |
 | 部分释放 | `POST {engine-root}/release_kv_cache`（404/405 视为无此端点） | 不阻断，亲和释放收益丧失，`affinity_stats` 可见 |
 

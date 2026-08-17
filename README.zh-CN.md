@@ -121,6 +121,9 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 `AscendAffinityChatModel` 可对接任何 OpenAI 兼容引擎，但亲和收益取决于
 以下接口契约。
 
+符号约定：`base_url` 为 OpenAI 兼容基址（如 `http://host:8000/v1`）；
+`engine-root` 为去掉 `/v1` 后缀的同源地址，释放端点位于该路径下。
+
 **必需基线（任何引擎都能跑）**
 
 | 接口 | 要求 |
