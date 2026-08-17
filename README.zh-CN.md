@@ -33,7 +33,9 @@ pip install langchain-ascend-affinity
 
 ## 快速开始（LangChain 1.x）
 
-公共部分——每个会话一个模型实例，session 即缓存 salt：
+公共部分——**所有会话共用一个模型实例**；session 随每次 `invoke` 调用
+传递（运行元数据 → `cache_salt`），一个智能体即可服务多用户，无需
+按会话维护实例：
 
 ```python
 from langchain_ascend import AscendAffinityChatModel
@@ -41,8 +43,9 @@ from langchain_ascend import AscendAffinityChatModel
 llm = AscendAffinityChatModel(
     base_url="http://127.0.0.1:8000/v1",  # MindIE / vLLM-Ascend 服务地址
     model="Qwen3-32B",
-    session_id="user-123",                # 本次会话的 cache_salt
 )
+
+config = {"metadata": {"session_id": "user-123"}}  # 每会话独立的 salt
 ```
 
 ### langchain
@@ -55,7 +58,8 @@ agent = create_agent(
     system_prompt="你是一名理财顾问。",
 )
 result = agent.invoke(
-    {"messages": [("user", "帮我规划一笔3年期基金定投")]}
+    {"messages": [("user", "帮我规划一笔3年期基金定投")]},
+    config={"metadata": {"session_id": "user-123"}},
 )
 ```
 
@@ -72,7 +76,10 @@ graph.add_node("advise", advise)
 graph.add_edge(START, "advise")
 graph.add_edge("advise", END)
 app = graph.compile()
-app.invoke({"messages": [("user", "查询 SH000001 并给出建议")]})
+app.invoke(
+    {"messages": [("user", "查询 SH000001 并给出建议")]},
+    config={"metadata": {"session_id": "user-123"}},
+)
 ```
 
 ### deepagents
@@ -86,7 +93,8 @@ agent = create_deep_agent(
     system_prompt="你是一名理财顾问。",
 )
 result = agent.invoke(
-    {"messages": [("user", "调研指数基金并起草方案")]}
+    {"messages": [("user", "调研指数基金并起草方案")]},
+    config={"metadata": {"session_id": "user-123"}},
 )
 ```
 
@@ -99,13 +107,14 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 |---|---|---|
 | `base_url` | `http://127.0.0.1:8000/v1` | OpenAI 兼容引擎地址 |
 | `model` | `ascend-chat` | 通告给引擎的模型名 |
-| `session_id` | `None` | 未逐调用绑定会话时使用的缓存 salt |
+| `session_id` | `None` | 未逐调用绑定会话时的兜底 salt（仅单会话应用建议使用） |
 | `enable_affinity` | `True` | `False` = 普通 OpenAI 兼容客户端 |
 | `release_endpoint` | `/release_kv_cache` | 部分释放路径；置 `""` 禁用 |
 | `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | 常规请求选项 |
 
-每次调用的会话解析顺序：逐调用 / `bind(session_id=...)` 参数 → 运行元数据 →
-构造参数 `session_id`。
+每次调用的会话解析顺序：逐调用 / `bind(session_id=...)` 参数 → 运行
+元数据（`config={"metadata": {"session_id": ...}}`，多会话服务推荐，
+可穿透智能体/图层层传递）→ 构造参数 `session_id`（兜底）。
 
 **引擎要求**：salt 绑定需要引擎支持前缀缓存 salt（vLLM ≥ 0.9 风格）；部分
 释放需要 agent-core 兼容的 `/release_kv_cache` 端点。若引擎不支持，模型照常

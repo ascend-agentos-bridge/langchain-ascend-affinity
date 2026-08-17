@@ -36,8 +36,9 @@ pip install langchain-ascend-affinity
 
 ## Quick Start (LangChain 1.x)
 
-The shared piece — one model instance per conversation, session bound as the
-cache salt:
+The shared piece — **one model instance for all conversations**; the session
+travels with each `invoke` call (run metadata → `cache_salt`), so one agent
+can serve many users without instance-per-session churn:
 
 ```python
 from langchain_ascend import AscendAffinityChatModel
@@ -45,8 +46,9 @@ from langchain_ascend import AscendAffinityChatModel
 llm = AscendAffinityChatModel(
     base_url="http://127.0.0.1:8000/v1",  # MindIE / vLLM-Ascend endpoint
     model="Qwen3-32B",
-    session_id="user-123",                # cache_salt for this conversation
 )
+
+config = {"metadata": {"session_id": "user-123"}}  # per-conversation salt
 ```
 
 ### langchain
@@ -59,7 +61,8 @@ agent = create_agent(
     system_prompt="You are a financial advisor.",
 )
 result = agent.invoke(
-    {"messages": [("user", "Plan a 3-year monthly fund investment for me")]}
+    {"messages": [("user", "Plan a 3-year monthly fund investment for me")]},
+    config={"metadata": {"session_id": "user-123"}},
 )
 ```
 
@@ -76,7 +79,10 @@ graph.add_node("advise", advise)
 graph.add_edge(START, "advise")
 graph.add_edge("advise", END)
 app = graph.compile()
-app.invoke({"messages": [("user", "Check SH000001 and advise")]})
+app.invoke(
+    {"messages": [("user", "Check SH000001 and advise")]},
+    config={"metadata": {"session_id": "user-123"}},
+)
 ```
 
 ### deepagents
@@ -90,7 +96,8 @@ agent = create_deep_agent(
     system_prompt="You are a financial advisor.",
 )
 result = agent.invoke(
-    {"messages": [("user", "Research index funds and draft a plan")]}
+    {"messages": [("user", "Research index funds and draft a plan")]},
+    config={"metadata": {"session_id": "user-123"}},
 )
 ```
 
@@ -104,13 +111,15 @@ partial release, keeping the valid prefix cache-resident.
 |---|---|---|
 | `base_url` | `http://127.0.0.1:8000/v1` | OpenAI-compatible engine endpoint |
 | `model` | `ascend-chat` | model name advertised to the engine |
-| `session_id` | `None` | cache salt when no per-call session is bound |
+| `session_id` | `None` | fallback salt when no per-call session is bound (single-session apps) |
 | `enable_affinity` | `True` | `False` = plain OpenAI-compatible client |
 | `release_endpoint` | `/release_kv_cache` | partial-release path; `""` disables |
 | `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | standard request options |
 
 Session resolution per call: per-call / `bind(session_id=...)` kwargs → run
-metadata → constructor `session_id`.
+metadata (`config={"metadata": {"session_id": ...}}`, recommended for
+multi-session services — propagates through agents/graphs) → constructor
+`session_id` (fallback).
 
 **Engine requirements**: prefix-cache salt support (vLLM ≥ 0.9 style) for salt
 binding, and an agent-core compatible `/release_kv_cache` endpoint for partial
