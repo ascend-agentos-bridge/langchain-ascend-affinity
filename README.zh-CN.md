@@ -28,7 +28,7 @@
 
 ```bash
 pip install langchain-ascend-affinity
-# 依赖 langchain-core >=0.3（推荐 1.x）；无其他运行时依赖
+# 依赖 langchain-core >=1.0；无其他运行时依赖
 ```
 
 ## 快速开始（LangChain 1.x）

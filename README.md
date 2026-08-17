@@ -31,7 +31,7 @@ inference engine — no callbacks, no handler wiring.
 
 ```bash
 pip install langchain-ascend-affinity
-# requires langchain-core >=0.3 (1.x recommended); no other runtime deps
+# requires langchain-core >=1.0; no other runtime deps
 ```
 
 ## Quick Start (LangChain 1.x)
