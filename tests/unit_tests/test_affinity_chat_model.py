@@ -50,12 +50,12 @@ class TestRequestContract:
         assert payload["cache_sharing"] is True
         assert payload["cache_salt"] == "fixture-session"
 
-    def test_no_session_keeps_sharing_without_salt(self, mocker):
+    def test_no_session_stays_plain_client(self, mocker):
         model = AscendAffinityChatModel(base_url="http://engine.test/v1")
         post = _patch_post(model, mocker)
         model.invoke([HumanMessage(content="hi")])
         payload = post.call_args[0][2]
-        assert payload["cache_sharing"] is True
+        assert "cache_sharing" not in payload
         assert "cache_salt" not in payload
 
     def test_affinity_disabled_plain_payload(self, chat_llm, mocker):

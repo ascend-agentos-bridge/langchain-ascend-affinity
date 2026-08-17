@@ -136,6 +136,10 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 | 请求体携带 `cache_salt: <session_id>` | 按 vLLM-Ascend 前缀缓存 salt 语义：同 salt 会话获得独立 KV 桶，不被无关请求的 LRU 驱逐 | 退回共享 LRU 桶——无隔离、无收益 |
 | 检测到前缀被改写时 `POST {engine-root}/release_kv_cache`，携带 `model`、`cache_salt`、`cache_sharing`、`messages`、`messages_released_index`（以及可选的 `tools`、`tools_released_index`） | 按 agent-core 兼容的部分释放语义：从释放下标起丢弃脏块，保留有效前缀 | 记入 `releases_failed` 计数并告警；改写频繁的智能体失去释放收益 |
 
+**未绑定 session**——模型不发送任何亲和字段，保持普通 OpenAI 客户端。
+这是有意为之：没有 ``cache_salt`` 却发送 ``cache_sharing``，会让所有
+匿名请求挤进同一个共享缓存桶，存在跨会话 KV 污染风险。
+
 降级始终安全：符合规范的网关会忽略未知字段，释放失败仅产生非致命告警，
 模型作为普通 OpenAI 客户端照常工作。引擎的实际行为由基准测试显式暴露
 （release 端点探测、`affinity_stats`、疑似假亲和警报）——见

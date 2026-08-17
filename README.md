@@ -141,6 +141,11 @@ affinity gain is conditional on the following interface contract.
 | `cache_salt: <session_id>` in the request body | vLLM-Ascend-style prefix-cache salt: same-salt sessions get an isolated KV bucket that LRU cannot evict for unrelated requests | falls back to the shared LRU bucket — no isolation, no gain |
 | `POST {engine-root}/release_kv_cache` with `model`, `cache_salt`, `cache_sharing`, `messages`, `messages_released_index` (+ `tools`, `tools_released_index`) — only when the client detects a rewritten prefix | agent-core-compatible partial release: drop blocks from the released index, keep the valid prefix | `releases_failed` counter + warning; rewrite-heavy agent loops lose the release gain |
 
+**No session bound** — the model sends no affinity fields at all and stays
+a plain OpenAI client. This is deliberate: ``cache_sharing`` without a
+``cache_salt`` would lump every anonymous request into one shared cache
+bucket and risk cross-session KV pollution.
+
 Degradation is always safe: standards-compliant gateways ignore unknown
 fields, release failures stay non-fatal warnings, and the model keeps working
 as a plain OpenAI client. The benchmark makes the engine's actual behaviour

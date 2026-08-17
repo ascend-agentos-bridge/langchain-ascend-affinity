@@ -4,8 +4,8 @@ ported to LangChain as a drop-in BaseChatModel.
 Per generation request this model does exactly what agent-core's
 ``InferenceAffinityModelClient`` + ``KVCacheManager`` do:
 
-1. **Salt binding** — the request body carries ``cache_sharing: true`` and,
-   when a session is bound, ``cache_salt: <session_id>`` (aligned with the
+1. **Salt binding** — every request with a bound session carries
+   ``cache_sharing: true`` + ``cache_salt: <session_id>`` (aligned with the
    native vLLM / vLLM-Ascend prefix-cache salt).
 2. **Prefix-diff scheduling** — the outgoing ``(messages, tools)`` window is
    diffed against the previous window for that session. Pure appends (the
@@ -247,10 +247,13 @@ class AscendAffinityChatModel(BaseChatModel):
         if not self.enable_affinity:
             return
         self._affinity_stats["affinity_requests"] += 1
-        payload["cache_sharing"] = True
         if not session_id:
+            # No salt -> stay a plain OpenAI client. Sending cache_sharing
+            # without a salt would put every anonymous request into one
+            # shared cache bucket and risk cross-session KV pollution.
             return
         self._affinity_stats["salt_bound_requests"] += 1
+        payload["cache_sharing"] = True
         payload["cache_salt"] = session_id
         if not self.release_endpoint:
             self._prefix_tracker.update(session_id, message_dicts, tools)
