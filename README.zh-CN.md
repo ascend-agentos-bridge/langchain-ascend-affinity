@@ -149,6 +149,16 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 （release 端点探测、`affinity_stats`、疑似假亲和警报）——见
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md)。
 
+**MindIE 现状**（对照 MindIE 3.0.0 公开文档，2026-08）：公开
+RESTful 接口未提供逐请求 `cache_salt`、`/release_kv_cache` 端点或
+`agent_hint` 字段；其 Prefix Cache 为内容哈希跨会话复用，需在服务端
+`config.json` 配置 `plugin_params: {"plugin_type":"prefix_cache"}` 开启，
+且不支持与 function call(multiturn) + context/sequence parallel 叠加。
+因此在存量 MindIE 上，本库安全退化为"普通 OpenAI 客户端 + 引擎全局
+前缀缓存"（多轮 agent 仍有公共前缀命中收益，但无会话隔离与主动释放）；
+完整亲和收益依赖 vLLM-Ascend salt 语义或带 agent-hint 补丁的定制引擎。
+逐项对照表见 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md) 1.4 节。
+
 
 ## 与 openjiuwen agent-core 的协议兼容
 

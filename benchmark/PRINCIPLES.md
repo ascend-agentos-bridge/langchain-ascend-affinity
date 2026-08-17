@@ -67,6 +67,32 @@ KV 被盐"钉"在槽位里不被 LRU 驱逐；工具结束后下一轮请求直�
 > 见根 README 的"引擎接口要求"小节，测试侧的探测项与限流约束见
 > benchmark README 的"引擎接口要求"小节。
 
+### 1.4 主流引擎现状对照（以 MindIE 3.0.0 公开文档为准）
+
+本库依赖的接口在引擎侧的落地情况（核对于 MindIE-LLM `dev` 分支
+公开文档，2026-08）：
+
+| 依赖 | MindIE 3.0.0 公开接口现状 |
+|---|---|
+| `POST /v1/chat/completions` / `GET /v1/models` / `GET /metrics` | ✅ 支持。另有 `GET /metrics-json`：直接输出 TTFT/TBT 动态均值、执行/等待请求数、剩余 NPU block 数，可作引擎侧指标的补充源 |
+| `cache_salt` 逐请求会话隔离 | ❌ 无此请求字段。Prefix Cache 为**内容哈希**跨会话复用，经服务端 `config.json` 的 `plugin_params: {"plugin_type":"prefix_cache"}` 开启 |
+| `POST /release_kv_cache` 部分释放 | ❌ 公开 RESTful 清单无此端点（主动失效目前是 vLLM 社区 RFC #37168 提案，尚未合入任何引擎主线） |
+| `agent_hint` 生命周期字段 | ❌ 公开文档无此字段（openJiuwen×昇腾联合特性，evict/offload/prefetch，需定制版引擎） |
+
+MindIE Prefix Cache 的叠加约束（直接影响 agent 场景）：不支持
+prefix cache 与 context parallel + sequence parallel +
+function call(multiturn) 叠加；与 Multi-LoRA、SplitFuse+数据并行
+互斥；复用按 block 粒度（blocksize 的整数倍）；模型限 Qwen2/2.5/3、
+DeepSeek-R1/V3 系列。
+
+**实际含义**：在存量 MindIE 上运行本库，亲和字段被安全忽略，退化
+为"普通 OpenAI 客户端 + 引擎全局内容哈希前缀缓存"——多轮 agent
+的公共前缀（系统提示词、工具定义、早期历史）仍可命中，拿到**部分**
+TTFT 收益；但没有会话隔离与主动释放，`affinity_stats` 会显示
+salt 未生效。完整的算力亲和收益需要 vLLM-Ascend（`cache_salt`
+语义落地后）或带 agent-hint 补丁的 MindIE 定制版。这正是本基准
+测试要区分的三种结果：**真亲和 / 部分收益（纯前缀缓存）/ 假亲和**。
+
 ---
 
 ## 二、性能测试原理
@@ -209,3 +235,13 @@ python benchmark/run_benchmark.py --setup \
 
 可选 `--metrics-url`（引擎 Prometheus）与 `--npu-cmd`（NPU 采样命令）
 补齐引擎侧与 NPU 侧指标。报告输出在 `benchmark/reports/`。
+
+**Q9：在存量 MindIE 上跑，能看到多少收益？**
+
+公开版 MindIE 3.0.0 未暴露 `cache_salt` / `/release_kv_cache` /
+`agent_hint`（见 1.4 对照表），亲和请求退化为普通请求 + 引擎全局
+内容哈希前缀缓存：多轮 agent 的公共前缀（系统提示词、工具定义、
+早期历史）仍可命中，能拿到部分 TTFT 收益；但无会话隔离、无主动
+释放。报告中 salt 绑定与 release 指标为 0/失败属预期行为，不代表
+本库故障——引擎侧若开启了 Prefix Cache 插件，可对照
+`--metrics-url` 的命中率变化验证这部分收益。

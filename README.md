@@ -157,6 +157,19 @@ as a plain OpenAI client. The benchmark makes the engine's actual behaviour
 visible (release-endpoint probe, `affinity_stats`, suspected-false-affinity
 alert) — see [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
 
+**MindIE status** (checked against MindIE 3.0.0 public docs, 2026-08):
+the public RESTful surface exposes no per-request `cache_salt`, no
+`/release_kv_cache` endpoint and no `agent_hint` field; its Prefix Cache
+is content-hash based cross-session reuse, enabled server-side via
+`plugin_params: {"plugin_type":"prefix_cache"}` in `config.json`, and
+cannot stack with function call (multiturn) + context/sequence parallel.
+On stock MindIE this library therefore degrades to "plain OpenAI client +
+engine-global prefix cache" (multi-turn agents still gain from common-prefix
+hits, but there is no session isolation or active release); the full affinity
+gain requires vLLM-Ascend salt semantics or a custom engine carrying the
+agent-hint patch. See the per-item mapping in section 1.4 of
+[benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
+
 
 ## openjiuwen agent-core protocol compatibility
 
