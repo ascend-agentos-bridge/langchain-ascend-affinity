@@ -26,6 +26,7 @@ from benchmark.metrics import (
     median_metrics,
     overall_verdict,
     sample_sidecar,
+    verdict_text,
 )
 from benchmark.oj_adapter import OJCallCollector
 from benchmark.run_benchmark import (
@@ -101,6 +102,15 @@ class TestAggregate:
         assert median.decode_tokens == 50    # (40+50+60)/3
         assert median.llm_calls == 1
 
+    def test_median_empty_returns_defaults(self):
+        median = median_metrics([])
+        assert median.llm_calls == 0
+        assert median.ttft_mean_ms is None
+
+    def test_median_single_round_passthrough(self):
+        single = aggregate([_call(100.0, 1000.0)])
+        assert median_metrics([single]) is single
+
 
 class TestVerdicts:
     def test_ttft_pass_on_drop(self):
@@ -154,6 +164,38 @@ class TestVerdicts:
         ]
         assert "部分" in overall_verdict(verdicts, npu_moved=False)
 
+    def test_verdict_text_rendering(self):
+        verdict = judge("ttft_mean_ms", 540.0, 812.0)
+        text = verdict_text(verdict)
+        assert "→" in text
+        assert "33.5%" in text
+        assert "✅" in text
+
+    def test_verdict_text_na_and_pp(self):
+        na = judge("ttft_mean_ms", None, 812.0)
+        assert "n/a" in verdict_text(na)
+        assert verdict_text(na).endswith("➖")
+        pp = judge("kv_hit_rate", 40.0, 25.0)
+        assert "+15.0pp" in verdict_text(pp)  # percentage points unit
+        assert "40.0%" in verdict_text(pp)
+
+    def test_judge_baseline_zero_is_na(self):
+        verdict = judge("ttft_mean_ms", 100.0, 0.0)
+        assert verdict.status == NA
+        assert verdict.delta is None
+
+    def test_overall_no_core_metrics(self):
+        assert "不可得" in overall_verdict([], npu_moved=False)
+
+    def test_overall_no_improvement(self):
+        verdicts = [
+            judge("ttft_mean_ms", 10.1, 10.0),
+            judge("prefill_per_call", 100.0, 100.0),
+            judge("kv_hit_rate", 20.5, 20.0),
+            judge("e2e_mean_ms", 100.2, 100.0),
+        ]
+        assert "未体现" in overall_verdict(verdicts, npu_moved=False)
+
 
 class TestEngineSources:
     def test_prometheus_parse_and_cache_delta(self, mocker):
@@ -184,6 +226,37 @@ class TestEngineSources:
     def test_sidecar_disabled_or_bad_returns_none(self):
         assert sample_sidecar("") is None
 
+    def test_prometheus_connection_error_returns_none(self, mocker):
+        mocker.patch("urllib.request.urlopen", side_effect=OSError("engine down"))
+        assert fetch_prometheus("http://engine/metrics") is None
+
+    def test_prometheus_bad_number_line_ignored(self, mocker):
+        fake = mocker.MagicMock()
+        fake.__enter__.return_value.read.return_value = (
+            b"vllm:gpu_prefix_cache_hits_total 1e+\n"
+        )
+        mocker.patch("urllib.request.urlopen", return_value=fake)
+        assert fetch_prometheus("http://engine/metrics") is None
+
+    def test_cache_delta_missing_snapshot(self):
+        assert cache_hit_rate_delta(None, {"a": 1.0}) is None
+        assert cache_hit_rate_delta({}, {}) is None
+
+    def test_cache_delta_no_queries(self):
+        before = {
+            "vllm:gpu_prefix_cache_hits_total": 10.0,
+            "vllm:gpu_prefix_cache_queries_total": 0.0,
+        }
+        after = {
+            "vllm:gpu_prefix_cache_hits_total": 10.0,
+            "vllm:gpu_prefix_cache_queries_total": 0.0,
+        }
+        assert cache_hit_rate_delta(before, after) is None
+
+    def test_sidecar_command_error_returns_none(self, mocker):
+        mocker.patch("subprocess.run", side_effect=OSError("no sampler"))
+        assert sample_sidecar("npu-smi") is None
+
 
 class TestTasksBaseline:
     def test_synthetic_customers_present(self):
@@ -205,6 +278,31 @@ class TestTasksBaseline:
         task = bench_tasks.load_longrun_tasks()[0]
         assert task.category == "longrun"
         assert "C2001" in task.turns[0] and "C2025" in task.turns[0]
+
+    def test_fund_profile_missing(self):
+        profile = bench_tasks.fund_profile_of("F999")
+        assert "error" in profile
+
+    def test_risk_ratings_balanced_and_conservative(self):
+        assert bench_tasks.portfolio_risk(40, 30, 30)["rating"] == "平衡"
+        assert bench_tasks.portfolio_risk(10, 40, 50)["rating"] == "稳健"
+
+    def test_tool_wrappers(self):
+        holdings = bench_tasks.get_customer_holdings.func("C2001")
+        assert "error" not in holdings
+        fund = bench_tasks.get_fund_profile.func("F001")
+        assert "error" not in fund
+        risk = bench_tasks.compute_portfolio_risk.func(70, 20, 10)
+        assert risk["rating"] == "激进"
+
+    def test_build_tools(self):
+        tools = bench_tasks.build_tools()
+        assert len(tools) == 3
+        assert {tool.name for tool in tools} == {
+            "get_customer_holdings",
+            "get_fund_profile",
+            "compute_portfolio_risk",
+        }
 
 
 class TestOJCollector:

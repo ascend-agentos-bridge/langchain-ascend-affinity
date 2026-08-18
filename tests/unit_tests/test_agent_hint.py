@@ -307,3 +307,71 @@ class TestIdleAutoEvict:
         mocker.patch.object(model, "_post", side_effect=OSError("engine busy"))
         model._idle_evict_cb("s1")  # must not raise
         assert model.affinity_stats["management_failed"] == 1
+
+
+class TestBuildTargetEdits:
+    """Direct coverage of the edit-builder validation branches."""
+
+    def test_rejects_unknown_action(self):
+        with pytest.raises(ValueError, match="unknown agent_hint action"):
+            AscendAffinityChatModel._validate_action_target("nuke", "session")
+
+    def test_range_edit_rejects_start_ge_end(self):
+        with pytest.raises(ValueError, match="requires start < end"):
+            AscendAffinityChatModel._range_edit("evict", "messages", 2, 2)
+
+    def test_session_target_rejects_include_tools(self):
+        with pytest.raises(ValueError, match="does not accept include_tools"):
+            AscendAffinityChatModel._build_target_edits(
+                action="evict", target="session", include_tools=True
+            )
+
+    def test_messages_target_rejects_tools_range_without_include(self):
+        with pytest.raises(ValueError, match="requires include_tools=True"):
+            AscendAffinityChatModel._build_target_edits(
+                action="evict",
+                target="messages",
+                msg_start=0,
+                msg_end=1,
+                tools_start=0,
+                tools_end=1,
+            )
+
+    def test_tools_target_rejects_include_tools(self):
+        with pytest.raises(ValueError, match="should not also set include_tools"):
+            AscendAffinityChatModel._build_target_edits(
+                action="evict",
+                target="tools",
+                tools_start=0,
+                tools_end=1,
+                include_tools=True,
+            )
+
+    def test_tools_target_rejects_messages_range(self):
+        with pytest.raises(ValueError, match="messages range is invalid"):
+            AscendAffinityChatModel._build_target_edits(
+                action="evict",
+                target="tools",
+                msg_start=0,
+                msg_end=1,
+                tools_start=0,
+                tools_end=1,
+            )
+
+    def test_tools_target_edits(self):
+        edits = AscendAffinityChatModel._build_target_edits(
+            action="evict", target="tools", tools_start=0, tools_end=1
+        )
+        assert edits == [{"type": "evict", "target": "tools", "start": 0, "end": 1}]
+
+    def test_build_agent_hint_requires_manage_request_bool(self):
+        with pytest.raises(ValueError, match="manage_request must be set"):
+            AscendAffinityChatModel._build_agent_hint(
+                session_id="s1", parent_session_id="s1", action="evict"
+            )
+
+    def test_manage_kvc_requires_session_id(self):
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", enable_agent_hint=True
+        )
+        assert model.evict_kvc() is False
