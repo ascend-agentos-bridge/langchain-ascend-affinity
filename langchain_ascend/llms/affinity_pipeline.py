@@ -84,10 +84,17 @@ class AffinityPipelineMixin:
             # No salt -> stay a plain OpenAI client. Sending cache_sharing
             # without a salt would put every anonymous request into one
             # shared cache bucket and risk cross-session KV pollution.
+            logger.debug("affinity skipped: no session bound")
             return
         self._affinity_stats["salt_bound_requests"] += 1
         payload["cache_sharing"] = True
         payload["cache_salt"] = session_id
+        logger.debug(
+            "salt-bound request: session=%s parent_session=%s agent_hint=%s",
+            session_id,
+            parent_session_id or session_id,
+            self.enable_agent_hint,
+        )
         if self.enable_agent_hint:
             payload["agent_hint"] = self._build_agent_hint(  # type: ignore[attr-defined]
                 session_id=session_id,
@@ -111,6 +118,13 @@ class AffinityPipelineMixin:
         )
         if plan is not None:
             self._affinity_stats["releases_attempted"] += 1
+            logger.debug(
+                "prefix divergence for session %s: release messages at "
+                "index %s, tools at %s",
+                session_id,
+                plan.messages_released_index,
+                plan.tools_released_index,
+            )
             release_payload: Dict[str, Any] = {
                 "model": self.model,
                 "cache_salt": session_id,
