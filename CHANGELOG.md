@@ -11,7 +11,19 @@
 
 ## [Unreleased]
 
-（暂无计划内容。本区块用于记录合并到 main 但尚未发布版本的变更。）
+### Added
+
+- **社区协作基础设施**（`.github/`）：`CONTRIBUTING.md`（质量门禁、提交
+  规范、双语文档同步规则、架构裁决）、Issue 模板（bug / feature）、PR
+  模板、`SECURITY.md`、`CODE_OF_CONDUCT.md`、`dependabot.yml`。
+
+### Changed
+
+- **`chat_ascend.py` 模块化拆分**：拆分为 transport / serialization /
+  affinity-pipeline / agent-hint 四个 mixin 模块
+  （`langchain_ascend/llms/`），公开 API 与协议行为完全不变（纯重构）。
+- **亲和决策 DEBUG 日志**：salt 绑定、前缀分叉释放决策（会话、释放下标）
+  在 DEBUG 级别输出；失败始终以 WARNING 记录。
 
 ## [0.2.0] - 2026-08
 
@@ -95,5 +107,9 @@
 
 ## 版本对比链接
 
-[0.2.0]: https://github.com/ascend-agentos-bridge/langchain-ascend-affinity/compare/v0.1.0...v0.2.0
+> **注**：`v0.1.0` tag 未存在于本仓库——v0.1 回调式实现代码在仓库重建时
+> 已移除，`v0.1.0` 的 compare 链接仅作历史参考。`v0.2.0` 为当前可追溯的
+> 首个发布 tag。
+
+[0.2.0]: https://github.com/ascend-agentos-bridge/langchain-ascend-affinity/compare/v0.2.0
 [0.1.0]: https://github.com/ascend-agentos-bridge/langchain-ascend-affinity/releases/tag/v0.1.0
