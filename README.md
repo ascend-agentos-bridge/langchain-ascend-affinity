@@ -108,6 +108,9 @@ partial release.
 | `session_id` | `None` | fallback salt for single-session apps |
 | `enable_affinity` | `True` | `False` = plain OpenAI-compatible client |
 | `release_endpoint` | `/release_kv_cache` | partial-release path on the engine root; `""` disables |
+| `enable_agent_hint` | `False` | opt into the agent_hint lifecycle protocol (identity fields + `evict` / `offload` / `prefetch` management) |
+| `idle_evict_after_seconds` | `0` | auto-evict the session's KV cache after this many seconds idle (`0` = off; requires `enable_agent_hint`) |
+| `streaming` | `False` | `invoke()` / `ainvoke()` stream via SSE internally and aggregate, emitting `on_llm_new_token` |
 | `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | standard request options (`api_key=""` for anonymous engines) |
 
 Session resolution per call: per-call / `bind(session_id=...)` kwargs → run
@@ -134,6 +137,29 @@ LLM-gateway passthrough behaviour are centrally maintained in
 [COMPATIBILITY.md](COMPATIBILITY.md). The benchmark makes the engine's
 actual behaviour visible (release-endpoint probe, `affinity_stats`) — see
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
+
+## Observability
+
+Every model instance exposes a read-only counter dict via `affinity_stats` —
+the same numbers the benchmark reports:
+
+| Key | Meaning |
+|---|---|
+| `affinity_requests` | requests that entered the affinity pipeline |
+| `salt_bound_requests` | requests actually salt-bound to a session |
+| `releases_attempted` | partial KV-release requests sent |
+| `releases_failed` | release requests that failed (never fatal) |
+| `management_requests` | agent_hint `evict` / `offload` / `prefetch` requests sent |
+| `management_failed` | management requests that failed (never fatal) |
+
+```python
+stats = model.affinity_stats
+# {"affinity_requests": 3, "salt_bound_requests": 3, ...}
+```
+
+At `DEBUG` log level the model records each salt binding and
+prefix-divergence release decision (session id, released indices); failures
+are always logged as warnings.
 
 ## Verification
 

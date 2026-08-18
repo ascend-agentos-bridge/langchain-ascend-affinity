@@ -106,6 +106,9 @@ deepagents 运行中的上下文编辑（摘要会改写历史消息）正是前
 | `session_id` | `None` | 单会话应用的兜底 salt |
 | `enable_affinity` | `True` | `False` = 普通 OpenAI 兼容客户端 |
 | `release_endpoint` | `/release_kv_cache` | 引擎根路径下的部分释放端点；置 `""` 禁用 |
+| `enable_agent_hint` | `False` | 可选启用 agent_hint 生命周期协议（身份字段 + `evict` / `offload` / `prefetch` 管理方法） |
+| `idle_evict_after_seconds` | `0` | 生成后空闲多少秒自动驱逐会话 KV 缓存（`0` = 关闭；需 `enable_agent_hint`） |
+| `streaming` | `False` | `invoke()` / `ainvoke()` 内部经 SSE 流式聚合，触发 `on_llm_new_token` 回调 |
 | `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | 常规请求选项（匿名引擎设 `api_key=""`） |
 
 每次调用的会话解析顺序：逐调用 / `bind(session_id=...)` 参数 → 运行
@@ -128,6 +131,28 @@ openjiuwen agent-core 的协议兼容、以及 LLM 网关透传行为，**集中
 [COMPATIBILITY.zh-CN.md](COMPATIBILITY.zh-CN.md)。引擎的实际行为由基准
 测试显式暴露（release 端点探测、`affinity_stats`）——见
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md)。
+
+## 可观测性
+
+每个模型实例通过 `affinity_stats` 暴露只读计数器字典——与基准测试报告的
+指标一致：
+
+| 键 | 含义 |
+|---|---|
+| `affinity_requests` | 进入亲和管线的请求数 |
+| `salt_bound_requests` | 实际与会话完成 salt 绑定的请求数 |
+| `releases_attempted` | 已发送的部分 KV 释放请求数 |
+| `releases_failed` | 释放失败数（从不致命） |
+| `management_requests` | 已发送的 agent_hint `evict` / `offload` / `prefetch` 请求数 |
+| `management_failed` | 管理请求失败数（从不致命） |
+
+```python
+stats = model.affinity_stats
+# {"affinity_requests": 3, "salt_bound_requests": 3, ...}
+```
+
+在 `DEBUG` 日志级别，模型记录每次 salt 绑定与前缀分叉释放决策（会话 id、
+释放下标）；失败始终以 WARNING 记录。
 
 ## 验证
 
