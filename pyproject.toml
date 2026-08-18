@@ -21,6 +21,11 @@ classifiers = [
 ]
 packages = [{ include = "langchain_ascend" }]
 
+[tool.poetry.urls]
+"Source" = "https://github.com/ascend-agentos-bridge/langchain-ascend-affinity"
+"Changelog" = "https://github.com/ascend-agentos-bridge/langchain-ascend-affinity/blob/main/CHANGELOG.md"
+"Issues" = "https://github.com/ascend-agentos-bridge/langchain-ascend-affinity/issues"
+
 [tool.poetry.dependencies]
 python = ">=3.9,<4.0"
 langchain-core = ">=1.0.0,<2.0.0"
