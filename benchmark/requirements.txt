@@ -1,4 +1,4 @@
 # Benchmark-only dependencies (not needed by the langchain_ascend library).
 deepagents>=0.2
-langchain-openai>=1.0
+langchain-openai>=1.5.1
 langchain>=1.0
