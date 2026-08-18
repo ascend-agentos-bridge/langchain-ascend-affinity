@@ -59,7 +59,8 @@ python benchmark/run_benchmark.py
 streaming`）。各探测项对引擎的要求：
 
 符号约定：`{base_url}` 为 OpenAI 兼容基址（`--engine-url`，缺 `/v1` 时自动
-补上）；`{engine-root}` 为去掉 `/v1` 的同源地址（见[根 README 契约](../README.zh-CN.md#引擎接口要求)）。
+补上）；`{engine-root}` 为去掉 `/v1` 的同源地址（见
+[COMPATIBILITY 第 1.1 节契约](../COMPATIBILITY.zh-CN.md#11-本库发送的接口契约)）。
 
 | 探测项 | 端点 | 不满足的后果 |
 |---|---|---|
@@ -73,7 +74,8 @@ streaming`）。各探测项对引擎的要求：
 - **usage 透传** —— 响应携带 `usage.prompt_tokens` /
   `completion_tokens` / `prompt_tokens_details.cached_tokens`；缺
   `cached_tokens` 时客户端 KV 命中率显示 ➖。
-- **亲和字段** —— 引擎须按[根 README 的接口契约](../README.zh-CN.md#引擎接口要求)
+- **亲和字段** —— 引擎须按
+  [COMPATIBILITY 第 1.1 节契约](../COMPATIBILITY.zh-CN.md#11-本库发送的接口契约)
   处理 `cache_salt` / `cache_sharing` 与释放端点；否则亲和退化为普通
   客户端，化验单会如实呈现。
 - **不要按 key 限流** —— 四个 agent 设计上共用一个 API key；若网关对

@@ -9,23 +9,16 @@ inference engine — no callbacks, no handler wiring.
 
 ## How it works
 
-`AscendAffinityChatModel` does exactly what agent-core's
-`InferenceAffinityModelClient` + `KVCacheManager` do, per LLM call:
+Per LLM call, `AscendAffinityChatModel` does three things:
 
-1. **Salt binding** — every `/v1/chat/completions` request carries
-   `cache_sharing: true` + `cache_salt: <session_id>` (native vLLM /
-   vLLM-Ascend prefix-cache salt), so each session gets an isolated KV-cache
-   bucket instead of thrashing a shared one.
+1. **Salt binding** — every request carries `cache_sharing: true` +
+   `cache_salt: <session_id>`, giving each session an isolated KV-cache bucket.
 2. **Prefix-diff scheduling** — the outgoing `(messages, tools)` window is
-   diffed against the previous window for that session. Pure appends (the
-   normal agent loop) keep the prefix cache hot; rewritten history
-   (`trim_messages`, summarization, deepagents context editing) yields the
-   first divergent index.
-3. **Partial release** — on divergence the model posts the previous window to
-   `POST {engine}/release_kv_cache` with `messages_released_index` /
-   `tools_released_index` (byte-compatible with agent-core), so the engine
-   drops only the stale KV blocks and keeps the valid prefix resident.
-   Release failures are logged, never fatal.
+   diffed against the previous window; pure appends (the normal agent loop)
+   keep the prefix cache hot, rewrites yield the first divergent index.
+3. **Partial release** — on divergence the model posts the stale window to
+   `POST {engine}/release_kv_cache`; the engine drops only the stale KV
+   blocks. Release failures are logged, never fatal.
 
 ## Installation
 
@@ -36,9 +29,8 @@ pip install langchain-ascend-affinity
 
 ## Quick Start (LangChain 1.x)
 
-The shared piece — **one model instance for all conversations**; the session
-travels with each `invoke` call (run metadata → `cache_salt`), so one agent
-can serve many users without instance-per-session churn:
+**One model instance for all conversations** — the session travels with each
+`invoke` call (run metadata → `cache_salt`), so one agent serves many users:
 
 ```python
 from langchain_ascend import AscendAffinityChatModel
@@ -47,8 +39,6 @@ llm = AscendAffinityChatModel(
     base_url="http://127.0.0.1:8000/v1",  # MindIE / vLLM-Ascend endpoint
     model="Qwen3-32B",
 )
-
-config = {"metadata": {"session_id": "user-123"}}  # per-conversation salt
 ```
 
 ### langchain
@@ -62,11 +52,11 @@ agent = create_agent(
 )
 result = agent.invoke(
     {"messages": [("user", "Plan a 3-year monthly fund investment for me")]},
-    config={"metadata": {"session_id": "user-123"}},
+    config={"metadata": {"session_id": "user-123"}},  # per-conversation salt
 )
 ```
 
-### langgraph
+<details><summary>langgraph</summary>
 
 ```python
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -85,7 +75,9 @@ app.invoke(
 )
 ```
 
-### deepagents
+</details>
+
+<details><summary>deepagents</summary>
 
 ```python
 from deepagents import create_deep_agent
@@ -103,103 +95,45 @@ result = agent.invoke(
 
 deepagents' mid-run context editing (summarization rewrites history) is where
 the prefix-diff scheduler pays off: every rewrite triggers exactly one
-partial release, keeping the valid prefix cache-resident.
+partial release.
+
+</details>
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---|---|
-| `base_url` | `http://127.0.0.1:8000/v1` | OpenAI-compatible engine endpoint |
+| `base_url` | `http://127.0.0.1:8000/v1` | engine endpoint; accepts an origin, a `/v1` base, or a full `/chat/completions` URL |
 | `model` | `ascend-chat` | model name advertised to the engine |
-| `session_id` | `None` | fallback salt when no per-call session is bound (single-session apps) |
+| `session_id` | `None` | fallback salt for single-session apps |
 | `enable_affinity` | `True` | `False` = plain OpenAI-compatible client |
-| `release_endpoint` | `/release_kv_cache` | partial-release path; `""` disables |
-| `enable_agent_hint` | `False` | opt-in agent_hint lifecycle protocol (see below) |
-| `idle_evict_after_seconds` | `0.0` | auto-evict the session KV cache after this many idle seconds (0 = off; requires `enable_agent_hint`) |
-| `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | standard request options |
+| `release_endpoint` | `/release_kv_cache` | partial-release path on the engine root; `""` disables |
+| `timeout` / `api_key` / `temperature` / `top_p` / `max_tokens` | — | standard request options (`api_key=""` for anonymous engines) |
 
 Session resolution per call: per-call / `bind(session_id=...)` kwargs → run
 metadata (`config={"metadata": {"session_id": ...}}`, recommended for
 multi-session services — propagates through agents/graphs) → constructor
-`session_id` (fallback).
+`session_id` (fallback). Without a session the model sends no affinity
+fields and stays a plain OpenAI client.
 
-## Engine interface requirements
+Advanced: `enable_agent_hint` / `idle_evict_after_seconds` opt into the
+agent_hint lifecycle protocol (identity + evict / offload / prefetch) —
+see [COMPATIBILITY.md](COMPATIBILITY.md).
 
-`AscendAffinityChatModel` works with any OpenAI-compatible engine, but the
-affinity gain is conditional on the following interface contract.
+## Engine support
 
-Notation: `base_url` is the OpenAI-compatible base (e.g. `http://host:8000/v1`);
-`engine-root` is the same origin without the `/v1` suffix, where the release
-endpoint lives.
+Works with any OpenAI-compatible engine; the affinity gain depends on the
+engine consuming the affinity fields (`cache_salt`, `/release_kv_cache`).
+Degradation is always safe: engines that ignore unknown fields treat
+requests as plain OpenAI calls, and release failures stay non-fatal
+warnings.
 
-**Required baseline (works everywhere)**
-
-| Interface | Requirement |
-|---|---|
-| `POST {base_url}/chat/completions` | OpenAI-compatible `messages`; `tools` for tool-calling agents; `stream` (SSE) for TTFT measurement |
-| Auth | `Authorization: Bearer <api_key>` |
-
-**Affinity contract (decides whether there is any gain)**
-
-| What this library sends | Engine expectation | If missing / ignored |
-|---|---|---|
-| `cache_sharing: true` in the request body | opt the session into prefix-cache sharing | no gain, harmless |
-| `cache_salt: <session_id>` in the request body | vLLM-style prefix-cache salt: the salt is injected into the first block hash, giving same-salt sessions an isolated KV namespace that different-salt requests cannot reuse (eviction under memory pressure still follows engine policy) | falls back to the shared cache bucket — no isolation, no gain |
-| `POST {engine-root}/release_kv_cache` with `model`, `cache_salt`, `cache_sharing`, `messages`, `messages_released_index` (+ `tools`, `tools_released_index`) — only when the client detects a rewritten prefix | agent-core-compatible partial release: drop blocks from the released index, keep the valid prefix | `releases_failed` counter + warning; rewrite-heavy agent loops lose the release gain |
-
-**No session bound** — the model sends no affinity fields at all and stays
-a plain OpenAI client. This is deliberate: ``cache_sharing`` without a
-``cache_salt`` would lump every anonymous request into one shared cache
-bucket and risk cross-session KV pollution.
-
-Degradation is always safe: standards-compliant gateways ignore unknown
-fields, release failures stay non-fatal warnings, and the model keeps working
-as a plain OpenAI client. The benchmark makes the engine's actual behaviour
-visible (release-endpoint probe, `affinity_stats`, suspected-false-affinity
-alert) — see [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
-
-**MindIE status** (all versions ≤ 3.1.0): no `cache_salt`, no
-`/release_kv_cache`, no `agent_hint` — this library safely degrades to
-"plain OpenAI client + engine-global prefix cache" (multi-turn agents
-still gain from common-prefix hits, but there is no session isolation
-or active release).
-
-**vLLM-Ascend status**: `cache_salt` takes effect natively since
-v0.9.1 (an isolation namespace, not a residency guarantee) — the most
-convincing real-engine validation platform today; `/release_kv_cache`
-exists only in the unmerged vllm-ascend PR #6722, and `agent_hint` has
-no public engine implementation.
-
-The engine capability × supported-version matching list, the
-benefit-invalidation analysis on mismatch, and whether LLM gateways
-(LiteLLM / Higress / One API, etc.) pass affinity fields through are
-**centrally maintained** in [COMPATIBILITY.md](COMPATIBILITY.md)
-(not an unchecked authority — on any change, cross-verify against
-upstream sources); the evidence discipline lives in section 1.4 of
+Which engine versions support what (MindIE, vLLM-Ascend), the full
+interface contract, protocol compatibility with openjiuwen agent-core, and
+LLM-gateway passthrough behaviour are centrally maintained in
+[COMPATIBILITY.md](COMPATIBILITY.md). The benchmark makes the engine's
+actual behaviour visible (release-endpoint probe, `affinity_stats`) — see
 [benchmark/PRINCIPLES.md](benchmark/PRINCIPLES.md).
-
-
-## openjiuwen agent-core protocol compatibility
-
-This library tracks the affinity protocols of
-[openjiuwen agent-core](https://github.com/openJiuwen-ai/agent-core) and is
-checked against its affinity commits on every maintenance pass.
-
-| Protocol | What the client sends | Status in this library |
-|---|---|---|
-| **release** (default) | `cache_sharing: true` + `cache_salt: <session_id>` on every bound request; on rewritten history `POST {engine-root}/release_kv_cache` with `model` / `cache_salt` / `cache_sharing` / `messages` / `messages_released_index` (+ `tools` / `tools_released_index`) | byte-compatible with agent-core `InferenceAffinityModelClient.release()`; prefix-diff scheduling is automatic |
-| **agent_hint lifecycle** (stage A, opt-in) | `agent_hint: {session_id, parent_session_id}` identity on chat requests; `evict_kvc` / `offload_kvc` / `prefetch_kvc` management methods send `context_management: {manage_request: true, edits: [{type, target, start, end}]}`; inference-then-manage via per-call `agent_hint_manage={...}` (`manage_request: false`); idle auto-evict via `idle_evict_after_seconds` | field-for-field with agent-core `AscendAffinityModelClient` (2026-07 `63380f17e8`, vLLM-fix `75adc2b44e`); management actions default **off** (`enable_agent_hint=True` to enable) |
-
-Both degrade safely: engines that ignore unknown fields treat the request as
-a plain OpenAI call, and management failures are logged/counted, never fatal.
-
-`base_url` accepts an origin (`http://host:8000`), a `/v1` base
-(`http://host:8000/v1`), or a full `/chat/completions` endpoint; the
-release endpoint resolves on the engine root (origin without `/v1`).
-Authentication is optional: set `api_key=""` for anonymous engines.
-The newer lifecycle protocol is introduced in stages — identity + explicit
-management first, model-internal auto-scheduling only after real-engine
-evidence (see `benchmark/PRINCIPLES.md` for the evidence discipline).
 
 ## Verification
 

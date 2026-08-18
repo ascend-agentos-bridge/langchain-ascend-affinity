@@ -63,7 +63,8 @@ At start the runner probes the engine and prints the verdict
 
 Notation: `{base_url}` is the OpenAI-compatible base URL (`--engine-url`, `/v1`
 appended if missing); `{engine-root}` is the same origin without `/v1` (see the
-[root README contract](../README.md#engine-interface-requirements)).
+[interface contract](../COMPATIBILITY.md#11-interface-contract-sent-by-this-library)
+in COMPATIBILITY.md).
 
 | Probe | Endpoint | Blocks the run? |
 |---|---|---|
@@ -79,9 +80,10 @@ Beyond the probes, for trustworthy numbers:
   `prompt_tokens_details.cached_tokens`; without `cached_tokens` the
   client-side KV hit rate renders ➖.
 - **affinity fields** — the engine must honour `cache_salt` /
-  `cache_sharing` and the release endpoint per the contract in the
-  [root README](../README.md#engine-interface-requirements); otherwise
-  affinity degrades to a plain client and the lab sheet will show it.
+  `cache_sharing` and the release endpoint per the
+  [COMPATIBILITY.md contract](../COMPATIBILITY.md#11-interface-contract-sent-by-this-library);
+  otherwise affinity degrades to a plain client and the lab sheet will
+  show it.
 - **no per-key rate limiting** — all four agents share one API key by
   design; RPM/TPM quotas on that key inject queuing noise into every
   latency figure. Lift the quota for the benchmark window.

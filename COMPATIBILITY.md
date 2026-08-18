@@ -37,6 +37,38 @@ gradient:
   is vLLM-core **`cache_salt`** (since v0.9.0, PR #17045) — an isolation
   namespace, not a residency guarantee or active release.
 
+### 1.1 Interface contract sent by this library
+
+Notation: `base_url` is the OpenAI-compatible base (e.g.
+`http://host:8000/v1`); `engine-root` is the same origin without the `/v1`
+suffix, where the release endpoint lives. `base_url` accepts an origin, a
+`/v1` base, or a full `/chat/completions` endpoint; authentication is
+optional (`api_key=""` for anonymous engines).
+
+**Required baseline (works everywhere)**
+
+| Interface | Requirement |
+|---|---|
+| `POST {base_url}/chat/completions` | OpenAI-compatible `messages`; `tools` for tool-calling agents; `stream` (SSE) for TTFT measurement |
+| Auth | `Authorization: Bearer <api_key>` |
+
+**Affinity contract (decides whether there is any gain)**
+
+| What this library sends | Engine expectation | If missing / ignored |
+|---|---|---|
+| `cache_sharing: true` in the request body | opt the session into prefix-cache sharing | no gain, harmless |
+| `cache_salt: <session_id>` in the request body | vLLM-style prefix-cache salt: the salt is injected into the first block hash, giving same-salt sessions an isolated KV namespace that different-salt requests cannot reuse (eviction under memory pressure still follows engine policy) | falls back to the shared cache bucket — no isolation, no gain |
+| `POST {engine-root}/release_kv_cache` with `model`, `cache_salt`, `cache_sharing`, `messages`, `messages_released_index` (+ `tools`, `tools_released_index`) — only when the client detects a rewritten prefix | agent-core-compatible partial release: drop blocks from the released index, keep the valid prefix | `releases_failed` counter + warning; rewrite-heavy agent loops lose the release gain |
+
+**No session bound** — the model sends no affinity fields at all and stays
+a plain OpenAI client. This is deliberate: `cache_sharing` without a
+`cache_salt` would lump every anonymous request into one shared cache
+bucket and risk cross-session KV pollution.
+
+Degradation is always safe: standards-compliant gateways ignore unknown
+fields, release failures stay non-fatal warnings, and the model keeps
+working as a plain OpenAI client.
+
 ## 2. Version matching list
 
 ### 2.1 openjiuwen agent-core protocol timeline
@@ -47,9 +79,10 @@ gradient:
 | develop `63380f17e8` | 2026-07-22 | **agent_hint lifecycle** (new, +8858/−1054, removes old KVCacheManager) | `agent_hint: {session_id, parent_session_id, context_management: {manage_request, edits: [{type, target, start, end}]}}`; `evict_kvc`/`offload_kvc`/`prefetch_kvc` methods |
 | develop `75adc2b44e` | 2026-08-17 | vLLM joint-debug fixes | three-branch URL normalization; multi-shape SSE compatibility; inference-then-manage (`manage_request=false`) |
 
-> This library implements both protocols: release protocol on by default,
-> agent_hint protocol opt-in (`enable_agent_hint`), field-aligned with the
-> develop branch.
+> This library implements both protocols: release protocol on by default
+> (byte-compatible with agent-core `InferenceAffinityModelClient.release()`,
+> prefix-diff scheduling automatic), agent_hint protocol opt-in
+> (`enable_agent_hint`), field-aligned with the develop branch.
 
 ### 2.2 Engine capability → supported versions (supported only, one representative each)
 

@@ -82,7 +82,8 @@ baseline 只能让引擎留着一整段脏缓存，亲和路径则精确释放�
 > agent_hint 管理。若引擎不认识这些字段，亲和请求会退化为普通请求——
 > 报告里 `affinity_stats.releases_failed` / `management_failed` 与
 > "假亲和警报"会把这种情况暴露出来。字段级完整契约（请求字段、端点、
-> 降级行为）见根 README 的"引擎接口要求"与"协议兼容"小节，测试侧的
+> 降级行为）见 [COMPATIBILITY.zh-CN.md](../COMPATIBILITY.zh-CN.md)
+> 第 1.1 节（接口契约）与第 2 节（协议时间线），测试侧的
 > 探测项与限流约束见 benchmark README 的"引擎接口要求"小节。
 
 ### 1.4 主流引擎现状对照

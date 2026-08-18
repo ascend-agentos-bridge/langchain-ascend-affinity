@@ -30,6 +30,35 @@
   （v0.9.0 起，PR #17045）——它提供会话隔离命名空间，但不提供驻留保证
   与主动释放。
 
+### 1.1 本库发送的接口契约
+
+符号约定：`base_url` 为 OpenAI 兼容基址（如 `http://host:8000/v1`）；
+`engine-root` 为去掉 `/v1` 后缀的同源地址，释放端点位于该路径下。
+`base_url` 支持裸 origin、带 `/v1` 基址或完整 `/chat/completions` 端点
+三种形态；认证可选（匿名引擎设 `api_key=""`）。
+
+**必需基线（任何引擎都能跑）**
+
+| 接口 | 要求 |
+|---|---|
+| `POST {base_url}/chat/completions` | OpenAI 兼容 `messages`；工具调用智能体需支持 `tools`；测 TTFT 需支持 `stream`（SSE） |
+| 认证 | `Authorization: Bearer <api_key>` |
+
+**亲和契约（决定有没有收益）**
+
+| 本库发送什么 | 引擎应做什么 | 缺失/被忽略时的行为 |
+|---|---|---|
+| 请求体携带 `cache_sharing: true` | 允许该会话加入前缀缓存共享 | 无收益，无害 |
+| 请求体携带 `cache_salt: <session_id>` | 按 vLLM 前缀缓存 salt 语义：salt 注入首块哈希，同 salt 会话获得隔离的 KV 命名空间，异 salt 请求无法复用（显存压力下的驱逐策略仍由引擎决定） | 退回共享缓存桶——无隔离、无收益 |
+| 检测到前缀被改写时 `POST {engine-root}/release_kv_cache`，携带 `model`、`cache_salt`、`cache_sharing`、`messages`、`messages_released_index`（以及可选的 `tools`、`tools_released_index`） | 按 agent-core 兼容的部分释放语义：从释放下标起丢弃脏块，保留有效前缀 | 记入 `releases_failed` 计数并告警；改写频繁的智能体失去释放收益 |
+
+**未绑定 session**——模型不发送任何亲和字段，保持普通 OpenAI 客户端。
+这是有意为之：没有 `cache_salt` 却发送 `cache_sharing`，会让所有匿名请求
+挤进同一个共享缓存桶，存在跨会话 KV 污染风险。
+
+降级始终安全：符合规范的网关会忽略未知字段，释放失败仅产生非致命告警，
+模型作为普通 OpenAI 客户端照常工作。
+
 ## 2. 版本匹配列表
 
 ### 2.1 openjiuwen agent-core 协议时间线
@@ -40,8 +69,10 @@
 | develop `63380f17e8` | 2026-07-22 | **agent_hint 生命周期**（新，+8858/−1054，删除旧 KVCacheManager） | `agent_hint: {session_id, parent_session_id, context_management: {manage_request, edits: [{type, target, start, end}]}}`；`evict_kvc`/`offload_kvc`/`prefetch_kvc` 方法 |
 | develop `75adc2b44e` | 2026-08-17 | vLLM 联调修复 | URL 归一化三分支；SSE 多形态兼容；推理后管理（`manage_request=false`） |
 
-> 本库 `AscendAffinityChatModel` 同时实现两条协议：release 协议默认开启，
-> agent_hint 协议 opt-in（`enable_agent_hint`），字段级对齐 develop 分支。
+> 本库 `AscendAffinityChatModel` 同时实现两条协议：release 协议默认开启
+> （与 agent-core `InferenceAffinityModelClient.release()` 字节兼容，前缀
+> 差异调度自动完成），agent_hint 协议 opt-in（`enable_agent_hint`），
+> 字段级对齐 develop 分支。
 
 ### 2.2 引擎能力 → 支持版本（只列支持的，每项一个代表版本）
 
