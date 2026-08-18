@@ -68,6 +68,7 @@ LangChain equivalent of agent-core's `InferenceAffinityModelClient` +
   1. 阶段 A（2026-08）：`AscendAffinityChatModel` 支持 `enable_agent_hint`
      （默认 False）注入身份字段，并暴露与 agent-core 同名同语义的管理方法
      `evict_kvc / offload_kvc / prefetch_kvc`；管理动作默认关闭，失败非致命。
+     **（已实现：v0.2.0，含 inference-then-manage 与 idle auto-evict。）**
   2. 阶段 B（待真机验证）：模型内自动调度策略 + benchmark 成本侧指标
      （KV cache usage peak / HBM / 并发容量）。
 - **兼容纪律**：协议构造与 agent-core `AscendAffinityModelClient` 字段级
