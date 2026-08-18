@@ -1,0 +1,77 @@
+name: 🐛 Bug 报告
+description: 报告 AscendAffinityChatModel 或 benchmark 中遇到的问题
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你花时间报告问题！请尽可能完整填写以下信息，帮助我们快速定位。
+  - type: dropdown
+    id: engine
+    attributes:
+      label: 推理引擎
+      description: 你使用的推理引擎是什么？
+      options:
+        - vLLM-Ascend
+        - MindIE
+        - vLLM (x86)
+        - 华为内部自研 vLLM
+        - 其他（请在补充说明中填写）
+    validations:
+      required: true
+  - type: input
+    id: engine_version
+    attributes:
+      label: 引擎版本
+      description: 引擎版本号（如 v0.9.1、3.1.0）
+      placeholder: "v0.9.1"
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python 版本
+      placeholder: "3.11.2"
+    validations:
+      required: true
+  - type: input
+    id: pkg_versions
+    attributes:
+      label: 相关包版本
+      description: langchain-core、langchain、langgraph、deepagents 的版本
+      placeholder: "langchain-core==1.5.5, deepagents==0.1.0"
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: 发生了什么？
+      description: 描述你遇到的问题，包括复现步骤
+      placeholder: |
+        1. 创建 AscendAffinityChatModel(...)
+        2. 调用 invoke([HumanMessage(...)])
+        3. 观察到...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你期望发生什么？
+    validations:
+      required: true
+  - type: textarea
+    id: affinity_stats
+    attributes:
+      label: affinity_stats 输出
+      description: 如有，请粘贴 model.affinity_stats 的返回值
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 堆栈
+      description: 粘贴完整的错误日志或堆栈信息
+      render: text
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充说明

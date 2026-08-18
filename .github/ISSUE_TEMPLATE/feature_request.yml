@@ -1,0 +1,43 @@
+name: ✨ 功能请求
+description: 提出一个新功能或改进建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提出功能建议！请描述你的需求场景，帮助我们更好地评估优先级。
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 动机 / 使用场景
+      description: 这个功能解决什么问题？你的使用场景是什么？
+      placeholder: "多租户部署时，需要每个租户独立配置 release_endpoint..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望方案
+      description: 你期望的功能如何工作？如有 API 设计草案请附上。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案
+      description: 你考虑过的其他实现方式？
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 怎样算这个功能完成？
+      placeholder: |
+        - [ ] 通过 _generate 扩展参数支持
+        - [ ] 单元测试覆盖新参数
+  - type: checkboxes
+    id: willing_pr
+    attributes:
+      label: 是否愿意提交 PR？
+      options:
+        - label: 我愿意为这个功能提交 PR
