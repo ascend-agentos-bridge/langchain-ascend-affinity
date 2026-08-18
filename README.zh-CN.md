@@ -154,6 +154,39 @@ stats = model.affinity_stats
 在 `DEBUG` 日志级别，模型记录每次 salt 绑定与前缀分叉释放决策（会话 id、
 释放下标）；失败始终以 WARNING 记录。
 
+## 异步与 agent_hint 用法
+
+`ainvoke` 走完全相同的亲和管线；agent_hint 管理方法是 `invoke` 的协议对等
+体（与 agent-core 同名同语义）：
+
+```python
+import asyncio
+
+from langchain_core.messages import HumanMessage
+
+from langchain_ascend import AscendAffinityChatModel
+
+
+async def main() -> None:
+    model = AscendAffinityChatModel(
+        base_url="http://127.0.0.1:8000/v1",
+        enable_agent_hint=True,  # 可选启用生命周期协议
+    )
+    reply = await model.ainvoke(
+        [HumanMessage(content="hello")],
+        config={"metadata": {"session_id": "s1"}},
+    )
+    print(reply.content)
+
+    # 生命周期管理，与 agent-core 方法语义一致
+    model.evict_kvc(session_id="s1")
+    model.offload_kvc(session_id="s1")
+    model.prefetch_kvc(session_id="s1")
+
+
+asyncio.run(main())
+```
+
 ## 验证
 
 真实亲和收益需在真实昇腾引擎上度量（MindIE / vLLM-Ascend 前缀缓存统计）。

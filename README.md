@@ -161,6 +161,39 @@ At `DEBUG` log level the model records each salt binding and
 prefix-divergence release decision (session id, released indices); failures
 are always logged as warnings.
 
+## Async & agent_hint usage
+
+`ainvoke` runs the identical affinity pipeline; the agent_hint management
+methods are protocol peers of `invoke` (agent-core parity):
+
+```python
+import asyncio
+
+from langchain_core.messages import HumanMessage
+
+from langchain_ascend import AscendAffinityChatModel
+
+
+async def main() -> None:
+    model = AscendAffinityChatModel(
+        base_url="http://127.0.0.1:8000/v1",
+        enable_agent_hint=True,  # opt into the lifecycle protocol
+    )
+    reply = await model.ainvoke(
+        [HumanMessage(content="hello")],
+        config={"metadata": {"session_id": "s1"}},
+    )
+    print(reply.content)
+
+    # lifecycle management, same semantics as agent-core's methods
+    model.evict_kvc(session_id="s1")
+    model.offload_kvc(session_id="s1")
+    model.prefetch_kvc(session_id="s1")
+
+
+asyncio.run(main())
+```
+
 ## Verification
 
 Real affinity benefit is measured on a real Ascend engine (MindIE /
