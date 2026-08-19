@@ -81,6 +81,13 @@ def _render_rounds_table(
         "|---|---|---|---|---|---|---|",
     ]
     for name in agent_names:
+        build_error = summaries[name].get("build_error")
+        if build_error:
+            rows.append(
+                f"| {name} | — | 0 | n/a | n/a | n/a | n/a |  "
+                f"⚠️ 构建失败，未执行：{build_error[:80]} |"
+            )
+            continue
         for round_idx, metrics in enumerate(summaries[name]["per_round"]):
             rows.append(
                 f"| {name} | {round_idx + 1} | {metrics['llm_calls']} "
@@ -92,7 +99,10 @@ def _render_rounds_table(
 
 
 def _render_correctness(
-    tasks: List[Any], results: List[Any], agent_names: List[str]
+    tasks: List[Any],
+    results: List[Any],
+    agent_names: List[str],
+    summaries: Dict[str, Dict[str, Any]],
 ) -> List[str]:
     by_key = {(r.agent, r.task_id): r for r in results}
     header = "| 任务 | " + " | ".join(agent_names) + " |"
@@ -105,6 +115,9 @@ def _render_correctness(
     for task in tasks:
         cells = []
         for name in agent_names:
+            if summaries[name].get("build_error"):
+                cells.append("⚠️ 未执行")
+                continue
             record = by_key.get((name, task.task_id))
             score = (
                 f"{record.keyword_hits}/{record.keywords_total}" if record else "n/a"
@@ -125,7 +138,7 @@ def _render_affinity_evidence(
             continue
         stats = summaries[name].get("affinity_stats", {})
         rows.append(
-            f"- **{name}** 亲和计数：{stats or '（openJiuwen 侧见引擎日志）'}"
+            f"- **{name}** 亲和计数（全程累计）：{stats or '（openJiuwen 侧见引擎日志）'}"
         )
         hit_rates = [
             window.get("hit_rate_delta")
@@ -189,8 +202,14 @@ def render_report_md(
         "",
         f"- 可达：{'✓' if probe.get('reachable') else '✗'}"
         f"（模型在列表中：{'✓' if probe.get('model_listed') else '✗'}）",
-        f"- `/release_kv_cache`：{'✓' if probe.get('release_endpoint') else '✗'}",
+        f"- `/release_kv_cache`：{'✓' if probe.get('release_endpoint') else '✗'}"
+        f"（缺失时自动禁用 release 请求，仅保留 cache_salt 绑定）",
         f"- 流式输出：{'✓' if probe.get('streaming') else '✗'}",
+        (
+            f"- 流式 usage（include_usage）：{'✓' if probe.get('stream_usage') else '✗'}"
+            "（✗ 时客户端无法获得 token 用量 → Prefill/Decode/KV 命中率/TPOT 均为 ➖；"
+            "请检查网关是否透传 stream_options，或配置 --metrics-url 走引擎侧指标）"
+        ),
         "",
         "## 2. 任务集（金融场景）",
         "",
@@ -212,7 +231,7 @@ def render_report_md(
         "",
         *_render_rounds_table(agent_names, summaries),
         "",
-        *_render_correctness(tasks, results, agent_names),
+        *_render_correctness(tasks, results, agent_names, summaries),
         "",
         *_render_affinity_evidence(summaries, agent_names),
         "",

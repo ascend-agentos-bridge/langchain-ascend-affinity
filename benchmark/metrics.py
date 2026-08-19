@@ -24,7 +24,7 @@ import statistics
 import subprocess  # nosec B404 - user-supplied sampler command, opt-in only
 import urllib.request
 from dataclasses import asdict, dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 PASS = "PASS"
 WARN = "WARN"
@@ -69,6 +69,20 @@ class AgentMetrics:  # pylint: disable=too-many-instance-attributes  # data carr
 
 def _safe_mean(values: List[float]) -> Optional[float]:
     return round(statistics.fmean(values), 2) if values else None
+
+
+def usage_field(usage: Any, key: str) -> Optional[int]:
+    """Read one field from LangChain ``usage_metadata``.
+
+    ``usage_metadata`` is a ``UsageMetadata`` TypedDict (a plain ``dict`` at
+    runtime) for every OpenAI-compatible integration, but some providers hand
+    out namespace objects. Accept both so token metrics never silently drop.
+    """
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage.get(key)
+    return getattr(usage, key, None)
 
 
 def _percentile(values: List[float], ratio: float) -> Optional[float]:
@@ -313,15 +327,66 @@ PROM_CACHE_QUERIES = "vllm:gpu_prefix_cache_queries_total"
 PROM_CACHE_USAGE = "vllm:gpu_cache_usage_perc"
 PROM_LATENCY = "vllm:e2e_request_latency_seconds_count"
 
+# vLLM renamed / added prefix-cache metrics across engines and versions
+# (V0 vs V1, ``gpu_`` vs ``num_``, counters vs the V1 ``prefix_cache_hit_rate``
+# gauge). Instead of hard-coding one name set, the deltas below discover
+# whichever counters/gauges the engine actually exposes, so the same harness
+# works against vLLM, vLLM-Ascend and gateway-passthrough deployments.
+_PREFIX_HIT_RE = re.compile(r"prefix.*cache.*hit.*(total|count)", re.I)
+_PREFIX_QUERY_RE = re.compile(r"prefix.*cache.*query.*(total|count)", re.I)
+_PREFIX_MISS_RE = re.compile(r"prefix.*cache.*miss.*(total|count)", re.I)
+_PREFIX_RATE_RE = re.compile(r"prefix.*cache.*hit_rate", re.I)
+_CACHE_USAGE_RE = re.compile(r"(gpu_)?cache.*usage.*(perc|percent|ratio)", re.I)
+
+
+def _pick_by_pattern(
+    snapshots: List[Optional[Dict[str, float]]], pattern: "re.Pattern[str]"
+) -> Optional[str]:
+    """First metric name matching ``pattern`` across the snapshots."""
+    for snapshot in snapshots:
+        for name in snapshot or {}:
+            if pattern.search(name):
+                return name
+    return None
+
+
+def _rate_delta_from_gauge(
+    before: Optional[Dict[str, float]], after: Optional[Dict[str, float]]
+) -> Optional[float]:
+    """V1 engines expose ``vllm:prefix_cache_hit_rate`` as a gauge: report
+    the window's end value directly (no counter delta semantics)."""
+    name = _pick_by_pattern([after, before], _PREFIX_RATE_RE)
+    value = (after or {}).get(name) if name else None
+    if value is None:
+        return None
+    return round(value * 100.0, 1) if value <= 1.0 else round(value, 1)
+
 
 def cache_hit_rate_delta(
     before: Optional[Dict[str, float]], after: Optional[Dict[str, float]]
 ) -> Optional[float]:
-    """Prefix-cache hit rate over the window between two snapshots (percent)."""
+    """Prefix-cache hit rate over the window between two snapshots (percent).
+
+    Resolution order: a bare ``*hit_rate`` gauge (V1 engine) at face value;
+    a ``hits`` + ``miss`` counter pair as ``hits / (hits + miss)``; a
+    ``hits`` + ``queries`` counter pair (or the legacy
+    ``gpu_prefix_cache_*`` names) as ``hits / queries``.
+    """
     if not before or not after:
         return None
-    queries = after.get(PROM_CACHE_QUERIES, 0.0) - before.get(PROM_CACHE_QUERIES, 0.0)
-    hits = after.get(PROM_CACHE_HITS, 0.0) - before.get(PROM_CACHE_HITS, 0.0)
+    if _pick_by_pattern([after, before], _PREFIX_RATE_RE) is not None:
+        return _rate_delta_from_gauge(before, after)
+    hit_name = _pick_by_pattern([after, before], _PREFIX_HIT_RE) or PROM_CACHE_HITS
+    hits = after.get(hit_name, 0.0) - before.get(hit_name, 0.0)
+    miss_name = _pick_by_pattern([after, before], _PREFIX_MISS_RE)
+    if miss_name:
+        missed = after.get(miss_name, 0.0) - before.get(miss_name, 0.0)
+        total = hits + missed
+        return round(hits / total * 100.0, 1) if total > 0 else None
+    query_name = (
+        _pick_by_pattern([after, before], _PREFIX_QUERY_RE) or PROM_CACHE_QUERIES
+    )
+    queries = after.get(query_name, 0.0) - before.get(query_name, 0.0)
     if queries <= 0:
         return None
     return round(hits / queries * 100.0, 1)
@@ -331,10 +396,13 @@ def cache_usage_peak(
     before: Optional[Dict[str, float]], after: Optional[Dict[str, float]]
 ) -> Optional[float]:
     """Peak KV-cache usage percentage across the two snapshots."""
+    name = (
+        _pick_by_pattern([before, after], _CACHE_USAGE_RE) or PROM_CACHE_USAGE
+    )
     values = [
-        snapshot.get(PROM_CACHE_USAGE)
+        snapshot.get(name)
         for snapshot in (before, after)
-        if snapshot and snapshot.get(PROM_CACHE_USAGE) is not None
+        if snapshot and snapshot.get(name) is not None
     ]
     return round(max(values), 3) if values else None
 

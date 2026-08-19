@@ -44,12 +44,21 @@ def build_baseline_model(
 
 
 def build_affinity_model(
-    *, model: str, base_url: str, api_key: str = "EMPTY", timeout: float = 120.0
+    *,
+    model: str,
+    base_url: str,
+    api_key: str = "EMPTY",
+    timeout: float = 120.0,
+    release_enabled: bool = True,
 ) -> Any:
     """Affinity chat model (salt binding + prefix diff + partial release).
 
     The per-task cache salt is delivered at invoke time via run metadata
     (``session_id``), which the affinity model resolves per call.
+
+    ``release_enabled=False`` (engine probe found no ``/release_kv_cache``)
+    disables release requests while keeping salt binding and prefix tracking,
+    so engines without the agent-core endpoint don't collect 404 noise.
     """
     from langchain_ascend import AscendAffinityChatModel
 
@@ -60,6 +69,7 @@ def build_affinity_model(
         temperature=0.3,
         timeout=timeout,
         streaming=True,
+        release_endpoint="/release_kv_cache" if release_enabled else "",
     )
 
 

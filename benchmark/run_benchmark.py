@@ -57,6 +57,7 @@ from benchmark.metrics import (
     fetch_prometheus,
     median_metrics,
     sample_sidecar,
+    usage_field,
 )
 from benchmark.reporting import _REPORT_DIR_DEFAULT, write_reports
 
@@ -122,6 +123,7 @@ class AgentSpec:
     recorder: Optional[Any] = None  # TTFTRecorder for lc agents
     collector: Optional[Any] = None  # OJCallCollector for oj agents
     affinity_source: Optional[Any] = None  # object exposing affinity_stats
+    build_error: Optional[str] = None  # set when the framework could not build
 
 
 class TTFTRecorder(BaseCallbackHandler):
@@ -186,10 +188,14 @@ def _record_from_response(
     try:
         message = response.generations[0][0].message
         usage = message.usage_metadata
-        prompt_tokens = getattr(usage, "input_tokens", None)
-        completion_tokens = getattr(usage, "output_tokens", None)
-        details = getattr(usage, "input_token_details", None)
-        cached_tokens = getattr(details, "cache_read", None)
+        prompt_tokens = usage_field(usage, "input_tokens")
+        completion_tokens = usage_field(usage, "output_tokens")
+        details = (
+            usage.get("input_token_details")
+            if isinstance(usage, dict)
+            else getattr(usage, "input_token_details", None)
+        )
+        cached_tokens = usage_field(details, "cache_read")
     except (AttributeError, IndexError, TypeError):
         pass
     return LlmCallRecord(
@@ -290,6 +296,25 @@ def probe_engine(engine: EngineConfig) -> Dict[str, Any]:
         probe["streaming"] = stream_status == 200 and "data:" in str(stream_body)
     except OSError:
         probe["streaming"] = False
+    try:
+        usage_status, usage_body = _http_json(
+            f"{engine.base_url.rstrip('/')}/chat/completions",
+            headers=auth,
+            payload={
+                "model": engine.model,
+                "messages": [{"role": "user", "content": "回复：好"}],
+                "max_tokens": 8,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        )
+        # vLLM-family engines emit a final SSE event carrying a top-level
+        # "usage" block only when stream_options.include_usage is honored.
+        probe["stream_usage"] = (
+            usage_status == 200 and '"usage"' in str(usage_body)
+        )
+    except OSError:
+        probe["stream_usage"] = False
     return probe
 
 
@@ -456,10 +481,44 @@ async def run_warmup(spec: AgentSpec, round_idx: int) -> None:
 # -- agent building --------------------------------------------------------------
 
 
+async def _build_oj_spec(
+    name: str, engine: EngineConfig, round_idx: int
+) -> AgentSpec:
+    """Build one openJiuwen spec; a framework failure is captured on the
+    spec (``build_error``) instead of aborting the whole benchmark."""
+    from benchmark.oj_adapter import OJCallCollector, build_openjiuwen_agent
+
+    collector = OJCallCollector(name)
+    try:
+        agent = await build_openjiuwen_agent(
+            affinity=name == "oj-affinity",
+            model=engine.model,
+            base_url=engine.base_url,
+            api_key=engine.api_key,
+            collector=collector,
+        )
+        return AgentSpec(
+            name=name, kind="oj", agent=agent, collector=collector,
+            affinity_source=None,
+        )
+    except Exception as exc:  # openJiuwen missing/API drift: record, skip
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"[build] {name} 构建失败，跳过：{error}", flush=True)
+        return AgentSpec(
+            name=name, kind="oj", agent=None, collector=collector,
+            affinity_source=None, build_error=error,
+        )
+
+
 async def build_agents(
-    names: List[str], engine: EngineConfig, round_idx: int
+    names: List[str], engine: EngineConfig, round_idx: int, release_enabled: bool
 ) -> List[AgentSpec]:
-    """Build the requested agents fresh per round (counters reset)."""
+    """Build the requested agents fresh per round (counters reset).
+
+    ``release_enabled`` comes from the engine probe: when the engine has no
+    ``/release_kv_cache`` endpoint, the affinity model skips release requests
+    (salt binding still applies) so no 404 noise inflates ``releases_failed``.
+    """
     specs: List[AgentSpec] = []
     for name in names:
         if name.startswith("lc-"):
@@ -476,6 +535,7 @@ async def build_agents(
                     model=engine.model,
                     base_url=engine.base_url,
                     api_key=engine.api_key,
+                    release_enabled=release_enabled,
                 )
             )
             specs.append(
@@ -488,25 +548,7 @@ async def build_agents(
                 )
             )
         else:
-            from benchmark.oj_adapter import OJCallCollector, build_openjiuwen_agent
-
-            collector = OJCallCollector(name)
-            agent = await build_openjiuwen_agent(
-                affinity=name == "oj-affinity",
-                model=engine.model,
-                base_url=engine.base_url,
-                api_key=engine.api_key,
-                collector=collector,
-            )
-            specs.append(
-                AgentSpec(
-                    name=name,
-                    kind="oj",
-                    agent=agent,
-                    collector=collector,
-                    affinity_source=None,
-                )
-            )
+            specs.append(await _build_oj_spec(name, engine, round_idx))
     return specs
 
 
@@ -534,6 +576,8 @@ async def run_agent_phase(
     """Warm-up + all tasks for one agent, wrapped in engine-side snapshots."""
     window = PhaseWindow(prom_before=fetch_prometheus(metrics_url))
     window.npu_samples.append(sample_sidecar(args.npu_cmd) or {})
+    if spec.agent is None:  # framework failed to build: skip the phase
+        return [], window
     await run_warmup(spec, round_idx)
     semaphore = asyncio.Semaphore(args.max_parallel)
 
@@ -567,6 +611,7 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
     tasks: List[Any],
     agent_names: List[str],
     args: argparse.Namespace,
+    release_enabled: bool = True,
 ) -> Dict[str, Any]:
     """All rounds (rotated order) + optional longrun phase."""
     per_agent_records: Dict[str, List[Any]] = {
@@ -578,10 +623,11 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
     windows: Dict[str, List[PhaseWindow]] = {name: [] for name in agent_names}
     results: List[TaskResult] = []
     affinity_stats: Dict[str, Dict[str, int]] = {}
+    build_errors: Dict[str, str] = {}
     for round_idx in range(args.rounds):
         order = rotate(agent_names, round_idx)
         print(f"=== round {round_idx + 1}/{args.rounds} order={order} ===", flush=True)
-        specs = await build_agents(order, engine, round_idx)
+        specs = await build_agents(order, engine, round_idx, release_enabled)
         for spec in specs:
             round_results, window = await run_agent_phase(
                 spec, tasks, round_idx, args, args.metrics_url or ""
@@ -601,10 +647,16 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
             per_agent_records[spec.name].extend(records)
             per_agent_rounds[spec.name].append(aggregate(call_metrics))
             windows[spec.name].append(window)
+            if spec.build_error:
+                build_errors[spec.name] = spec.build_error
             if spec.affinity_source is not None:
-                affinity_stats[spec.name] = dict(
-                    getattr(spec.affinity_source, "affinity_stats", {})
-                )
+                # counters reset per round on a fresh model: accumulate so the
+                # report shows the run-total, not just the last round
+                stats = dict(getattr(spec.affinity_source, "affinity_stats", {}))
+                previous = affinity_stats.get(spec.name, {})
+                affinity_stats[spec.name] = {
+                    key: previous.get(key, 0) + value for key, value in stats.items()
+                }
     summaries: Dict[str, Dict[str, Any]] = {}
     for name in agent_names:
         rounds_metrics = per_agent_rounds[name]
@@ -612,6 +664,7 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
             "median": asdict(median_metrics(rounds_metrics)),
             "per_round": [asdict(m) for m in rounds_metrics],
             "affinity_stats": affinity_stats.get(name, {}),
+            "build_error": build_errors.get(name),
             "engine_windows": [
                 {
                     "hit_rate_delta": w.hit_rate_delta,
@@ -756,13 +809,22 @@ def main() -> None:
     print(
         f"[probe] model_listed={probe.get('model_listed')} "
         f"release_endpoint={probe.get('release_endpoint')} "
-        f"streaming={probe.get('streaming')}"
+        f"streaming={probe.get('streaming')} "
+        f"stream_usage={probe.get('stream_usage')}"
     )
     tasks = load_tasks()
     if args.include_longrun:
         tasks += load_longrun_tasks()
     fingerprint = task_fingerprint(args.include_longrun)
-    data = asyncio.run(run_benchmark(engine, tasks, agent_names, args))
+    data = asyncio.run(
+        run_benchmark(
+            engine,
+            tasks,
+            agent_names,
+            args,
+            release_enabled=bool(probe.get("release_endpoint")),
+        )
+    )
     md_path = write_reports(
         report_dir=args.report_dir,
         engine=engine,

@@ -56,7 +56,7 @@ python benchmark/run_benchmark.py
 ## 引擎接口要求
 
 开跑前脚本会探测引擎并打印结果（`model_listed / release_endpoint /
-streaming`）。各探测项对引擎的要求：
+streaming / stream_usage`）。各探测项对引擎的要求：
 
 符号约定：`{base_url}` 为 OpenAI 兼容基址（`--engine-url`，缺 `/v1` 时自动
 补上）；`{engine-root}` 为去掉 `/v1` 的同源地址（见
@@ -67,23 +67,31 @@ streaming`）。各探测项对引擎的要求：
 | 可达性 | `GET {base_url}/models`（任意 HTTP 200） | **直接退出**并给出指引 |
 | 模型列表 | `GET {base_url}/models`，返回 `data[].id` | 不阻断——打印 `model_listed=False` 后继续运行 |
 | 流式 | `POST /chat/completions` 带 `stream: true`（SSE `data:` 帧） | 不阻断，但 lc 配对的 TTFT 失效 |
-| 部分释放 | `POST {engine-root}/release_kv_cache`（404/405 视为无此端点） | 不阻断，亲和释放收益丧失，`affinity_stats` 可见 |
+| 流式 usage | `POST /chat/completions` 带 `stream_options.include_usage: true`（末帧出现顶层 `"usage"`） | 不阻断；✗ 时 token 类指标（Prefill/Decode/KV 命中/TPOT）全部 ➖，请检查网关是否透传 `stream_options` |
+| 部分释放 | `POST {engine-root}/release_kv_cache`（404/405 视为无此端点） | 不阻断；**自动禁用 release 请求**（cache_salt 绑定保留），报告会注明 |
 
 探测之外，要求数据可信还需：
 
 - **usage 透传** —— 响应携带 `usage.prompt_tokens` /
   `completion_tokens` / `prompt_tokens_details.cached_tokens`；缺
-  `cached_tokens` 时客户端 KV 命中率显示 ➖。
+  `cached_tokens` 时客户端 KV 命中率显示 ➖。采集端同时兼容
+  `usage_metadata` 的 dict 形态（OpenAI 兼容）与命名空间对象形态。
 - **亲和字段** —— 引擎须按
   [COMPATIBILITY 第 1.1 节契约](../COMPATIBILITY.zh-CN.md#11-本库发送的接口契约)
   处理 `cache_salt` / `cache_sharing` 与释放端点；否则亲和退化为普通
-  客户端，化验单会如实呈现。
+  客户端，化验单会如实呈现。`cache_salt` 必须**每次调用绑定**：runner
+  通过 run metadata 传 `session_id`，亲和模型在 `_generate`/`_agenerate`
+  内解析（流式路径也经这两个方法，保证 metadata 不丢失）。
 - **不要按 key 限流** —— 四个 agent 设计上共用一个 API key；若网关对
   该 key 配置 RPM/TPM 配额，排队噪声会污染所有时延指标。请在测试
   窗口内放开配额。
 - 引擎侧 / NPU 侧指标可选，分别依赖 `--metrics-url`（vLLM 风格
   Prometheus `/metrics`）与 `--npu-cmd`（引擎机上的 `key=value`
-  采样命令）。
+  采样命令）。前缀缓存指标名自动识别（V0 计数器、V1
+  `prefix_cache_hit_rate` gauge、改名后的 usage 指标），同一套代码
+  兼容 vLLM / vLLM-Ascend / 网关透传部署。
+- 框架构建失败（如 openJiuwen 未安装）会在报告中以 `build_error`
+  行明确标注，而不是静默产出全零数据。
 
 ## 测量指标
 
@@ -97,7 +105,7 @@ streaming`）。各探测项对引擎的要求：
 | Decode tokens/s | decode tokens / decode 时长 | |
 | KV 命中率 / KV 内存（引擎侧） | `--metrics-url` Prometheus 快照差分 | 可选，无则 ➖ |
 | NPU 利用率 / 带宽 | `--npu-cmd` 采样 | 可选，无则 ➖ |
-| 亲和行为 | `affinity_stats`（salt 绑定、释放尝试/失败） | lc-affinity |
+| 亲和行为 | `affinity_stats`（salt 绑定、释放尝试/失败，跨轮累计） | lc-affinity |
 | 正确性 | 按任务的预期关键词命中，跨 agent 对比 | |
 
 任务集：8 段金融投顾对话（调仓 / 风险测评 / 产品对比 / 市场问答），
