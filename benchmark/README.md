@@ -55,6 +55,44 @@ Options:
 - `--api-key` (falls back to `ASCEND_API_KEY`, default `EMPTY` for local
   no-auth engines), `--max-parallel` (default 2), `--turn-timeout`
   (default 240 s), `--report-dir`.
+- `--log-level DEBUG|INFO|WARNING|ERROR` (default `INFO`): console log
+  verbosity. `DEBUG` additionally shows the affinity pipeline's per-request
+  salt/release decisions and request payloads.
+- `--log-file PATH`: also append the full run log (UTF-8) to a file; the
+  report's appendix links it.
+
+## Run log (full-chain observability)
+
+With the default `INFO` level the console shows one line per LLM call, per
+task, per agent phase and per engine window — everything needed to spot
+*silent* failures (unbound salt, missing usage, dropped framework):
+
+```
+[run] engine=http://.../v1 model=dsv4-0731 agents=['lc-baseline', ...] rounds=3
+[probe] {"reachable": true, "model_listed": true, "release_endpoint": false, "streaming": true, "stream_usage": false}
+=== round 1/3 order=[...] ===
+[llm] r0 lc-affinity rebalance-C1001 ttft=1,112ms e2e=8,470ms prompt=1,203 comp=412 cached=0 salt=yes
+[task] r0 lc-affinity rebalance-C1001 ok hits=2/3 turns=4 e2e=37,472ms
+[phase] r0 lc-affinity: tasks=8 llm_calls=44 ttft_mean=1,615ms e2e_mean=8,188ms salt=45/45 releases=0/0
+[engine] r0 lc-affinity hit_rate_delta=62.5% cache_usage_peak=0.872 npu=[{'util': 57.5}]
+```
+
+- `[llm]` — one line per LLM call: TTFT / E2E / prompt / completion /
+  cached tokens, and `salt=yes|no` (whether the call carried a session id —
+  `yes` is the precondition for `cache_salt` binding). `prompt/comp/cached`
+  show `None` when the engine (or gateway) does not return usage.
+- `[task]` — task outcome with keyword hits and total E2E.
+- `[phase]` — per agent per round: call volume, means, and the affinity
+  counters for that round (`salt=bound/total`, `releases=attempted/failed`).
+  **`salt=44/44` (bound == total) proves every request was salt-bound.**
+- `[engine]` — engine-side prefix hit rate / KV usage / NPU samples for the
+  window (only when `--metrics-url` / `--npu-cmd` are configured).
+- `[warmup]` / `[build]` — warm-up outcome and agent build failures (e.g.
+  openJiuwen missing), which would otherwise be silent.
+
+At `--log-level DEBUG`, the affinity model itself logs each salt binding and
+release decision (session id, released indices) plus request payloads —
+use this when a `[phase]` line shows `salt=0/N`.
 
 ## Engine interface requirements
 
