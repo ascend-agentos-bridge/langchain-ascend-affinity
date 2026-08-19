@@ -17,6 +17,20 @@
   规范、双语文档同步规则、架构裁决）、Issue 模板（bug / feature）、PR
   模板、`SECURITY.md`、`CODE_OF_CONDUCT.md`、`dependabot.yml`。
 
+### Fixed
+
+- **流式路径丢失 run metadata 导致 cache_salt 失效（真机 benchmark 暴露）**：
+  langchain-core 在 `streaming=True` 时绕过 `_generate`/`_agenerate` 直接调用
+  `_stream` 且不传 run manager，使 `config.metadata` 中的 `session_id` 无法到达
+  亲和管线——`affinity_stats.salt_bound_requests` 恒为 0。现通过
+  `_should_stream` 拦截将生成路径统一收敛到 `_generate`/`_agenerate`
+  （内部流式聚合、token 回调不变），异步路径经 `run_manager.get_sync()` 线程
+  安全转发；仅显式 `stream=True`（`stream()`/`astream()` API）保留框架流式分支。
+- **benchmark 采集端丢弃 token 用量**：`usage_metadata` 在 OpenAI 兼容集成中
+  是 `TypedDict`（运行时 dict），采集端却用 `getattr` 读取，导致 prompt /
+  completion / cached tokens 全部为空（Prefill、Decode、TPOT、KV 命中率 ➖）。
+  新增 `usage_field` 同时兼容 dict 与命名空间对象，`lc`/`oj` 两侧采集统一修复。
+
 ### Changed
 
 - **`chat_ascend.py` 模块化拆分**：拆分为 transport / serialization /
@@ -24,6 +38,15 @@
   （`langchain_ascend/llms/`），公开 API 与协议行为完全不变（纯重构）。
 - **亲和决策 DEBUG 日志**：salt 绑定、前缀分叉释放决策（会话、释放下标）
   在 DEBUG 级别输出；失败始终以 WARNING 记录。
+- **benchmark 引擎侧指标自动识别**：前缀缓存指标名跨 vLLM 版本自动发现
+  （V0 hit/query 计数器、V1 `prefix_cache_hit_rate` gauge、hits+miss 配对、
+  改名后的 usage 指标），同一套代码兼容 vLLM / vLLM-Ascend / 网关透传部署。
+- **benchmark release 自动禁用**：探测发现引擎无 `/release_kv_cache` 时，
+  亲和 agent 自动关闭 release 请求（`cache_salt` 绑定保留），不再产生 404
+  噪声与 `releases_failed` 虚高。
+- **benchmark 可观测性**：新增 `stream_usage` 引擎探测（`include_usage` 是否
+  生效，✗ 时报告提示 token 类指标缺失原因）；`affinity_stats` 改为跨轮累计；
+  框架构建失败（如 openJiuwen 缺失）以 `build_error` 行显式标注而非静默零数据。
 
 ## [0.2.0] - 2026-08
 

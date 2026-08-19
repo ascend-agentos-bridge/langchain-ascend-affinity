@@ -343,6 +343,90 @@ class TestStreaming:
         assert "".join(parts) == "ab"
 
 
+class TestStreamingRoute:
+    """invoke/ainvoke must keep the run manager (metadata -> cache salt)."""
+
+    def test_should_stream_false_for_generation(self, chat_llm):
+        assert chat_llm._should_stream(async_api=False) is False
+        assert chat_llm._should_stream(async_api=True) is False
+
+    def test_should_stream_true_for_explicit_stream_api(self, chat_llm):
+        assert chat_llm._should_stream(async_api=False, stream=True) is True
+        assert chat_llm._should_stream(async_api=True, stream=True) is True
+
+    def test_generate_with_stream_kwarg_streams_internally(self, chat_llm, mocker):
+        """Explicit stream=True stays on the internal streaming path so the
+        run manager (and its metadata) is never dropped."""
+        events = [
+            _content_event("Hel"),
+            _content_event("lo"),
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                },
+            },
+        ]
+        mocker.patch.object(chat_llm, "_stream_events", return_value=iter(events))
+        post = _patch_post(chat_llm, mocker)
+        manager = SimpleNamespace(
+            metadata={"session_id": "meta-session"}, on_llm_new_token=lambda *a, **k: None
+        )
+        result = chat_llm._generate(
+            [HumanMessage(content="hi")],
+            run_manager=manager,  # type: ignore[arg-type]
+            stream=True,
+        )
+        assert result.generations[0].message.content == "Hello"
+        assert post.call_count == 0  # streaming path, not _post
+
+    async def test_agenerate_uses_sync_run_manager(self, chat_llm, mocker):
+        """The worker thread must receive the sync counterpart of the async
+        run manager so on_llm_new_token stays thread-safe and metadata (the
+        session salt) is still visible."""
+
+        class FakeAsyncManager:
+            def __init__(self) -> None:
+                self.sync = SimpleNamespace(
+                    metadata={"session_id": "async-meta-session"},
+                    on_llm_new_token=lambda *a, **k: None,
+                )
+
+            def get_sync(self):
+                return self.sync
+
+        post = _patch_post(chat_llm, mocker)
+        await chat_llm._agenerate(
+            [HumanMessage(content="hi")], run_manager=FakeAsyncManager()  # type: ignore[arg-type]
+        )
+        payload = post.call_args[0][2]
+        assert payload["cache_salt"] == "async-meta-session"
+
+    def test_stream_usage_propagates_to_recorder(self, mocker):
+        """A streamed usage chunk must surface on the aggregated message."""
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", streaming=True
+        )
+        events = [
+            _content_event("Hel"),
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "total_tokens": 25,
+                    "prompt_tokens_details": {"cached_tokens": 15},
+                },
+            },
+        ]
+        mocker.patch.object(model, "_stream_events", return_value=iter(events))
+        message = model.invoke([HumanMessage(content="q")])
+        assert message.usage_metadata["input_tokens"] == 20
+        assert message.usage_metadata["input_token_details"] == {"cache_read": 15}
+
+
 class TestAffinityStats:
     def test_counters_track_bind_and_failed_release(self, chat_llm, mocker):
         ok = {"choices": [{"message": {"content": "ok"}}]}

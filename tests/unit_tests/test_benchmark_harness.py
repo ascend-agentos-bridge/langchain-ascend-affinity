@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,15 +27,21 @@ from benchmark.metrics import (
     median_metrics,
     overall_verdict,
     sample_sidecar,
+    usage_field,
     verdict_text,
 )
 from benchmark.oj_adapter import OJCallCollector
 from benchmark.run_benchmark import (
+    EngineConfig,
     LlmCallRecord,
     TTFTRecorder,
+    build_agents,
+    probe_engine,
     records_to_metrics,
     rotate,
     resolve_agents,
+    run_agent_phase,
+    run_benchmark,
 )
 
 
@@ -253,6 +260,37 @@ class TestEngineSources:
         }
         assert cache_hit_rate_delta(before, after) is None
 
+    def test_cache_delta_v1_gauge_names(self):
+        """V1 engines expose a hit-rate gauge instead of hit/query counters."""
+        before = {"vllm:prefix_cache_hit_rate": 0.42}
+        after = {"vllm:prefix_cache_hit_rate": 0.57}
+        assert cache_hit_rate_delta(before, after) == 57.0
+        # a gauge reporting 0-100 directly is passed through at face value
+        raw = {"vllm:prefix_cache_hit_rate": 10.0}
+        assert cache_hit_rate_delta(raw, {"vllm:prefix_cache_hit_rate": 80.0}) == 80.0
+
+    def test_cache_delta_alt_counter_names(self):
+        before = {
+            "vllm:prefix_cache_hits_total": 100.0,
+            "vllm:prefix_cache_miss_requests_total": 100.0,
+        }
+        after = {
+            "vllm:prefix_cache_hits_total": 160.0,
+            "vllm:prefix_cache_miss_requests_total": 100.0,
+        }
+        assert cache_hit_rate_delta(before, after) == 100.0
+
+    def test_cache_usage_peak_alt_name(self):
+        before = {"vllm:cache_usage_percent": 0.4}
+        after = {"vllm:cache_usage_percent": 0.75}
+        assert cache_usage_peak(before, after) == 0.75
+
+    def test_usage_field_accepts_dict_and_namespace(self):
+        assert usage_field({"input_tokens": 7, "output_tokens": 3}, "input_tokens") == 7
+        assert usage_field({"input_tokens": 7}, "output_tokens") is None
+        assert usage_field(SimpleNamespace(input_tokens=9), "input_tokens") == 9
+        assert usage_field(None, "input_tokens") is None
+
     def test_sidecar_command_error_returns_none(self, mocker):
         mocker.patch("subprocess.run", side_effect=OSError("no sampler"))
         assert sample_sidecar("npu-smi") is None
@@ -397,3 +435,201 @@ class TestRunnerGlue:
         recorder = TTFTRecorder("a", 0)
         recorder.on_llm_end(SimpleNamespace(generations=[]), run_id=uuid4())
         assert not recorder.calls
+
+    def test_recorder_extracts_dict_usage_metadata(self):
+        """usage_metadata is a TypedDict at runtime; getattr would drop it."""
+        recorder = TTFTRecorder("lc-affinity", 0)
+        run_id = uuid4()
+        recorder.on_llm_start({}, ["hi"], run_id=run_id, metadata={})
+        recorder.on_llm_new_token("x", run_id=run_id)
+        response = SimpleNamespace(
+            generations=[
+                [
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            usage_metadata={
+                                "input_tokens": 120,
+                                "output_tokens": 40,
+                                "total_tokens": 160,
+                                "input_token_details": {"cache_read": 90},
+                            }
+                        )
+                    )
+                ]
+            ]
+        )
+        recorder.on_llm_end(response, run_id=run_id)
+        record: LlmCallRecord = recorder.calls[0]
+        assert record.prompt_tokens == 120
+        assert record.completion_tokens == 40
+        assert record.cached_tokens == 90
+
+    def test_oj_collector_extracts_dict_usage(self):
+        collector = OJCallCollector("oj-affinity")
+        collector.bind_task("task-1", 0)
+        usage = {
+            "input_tokens": 120,
+            "output_tokens": 45,
+            "total_tokens": 165,
+            "input_token_details": {"cache_read": 100},
+        }
+        ctx = SimpleNamespace(
+            inputs=SimpleNamespace(response=SimpleNamespace(usage_metadata=usage))
+        )
+
+        async def run() -> None:
+            await collector.before_model_call(ctx)
+            await collector.after_model_call(ctx)
+
+        asyncio.run(run())
+        record = collector.records[0]
+        assert record.prompt_tokens == 120
+        assert record.completion_tokens == 45
+        assert record.cached_tokens == 100
+
+    def test_probe_engine_reports_stream_usage(self, mocker):
+        engine = EngineConfig(
+            base_url="http://engine.test/v1",
+            engine_root="http://engine.test",
+            model="dsv4-0731",
+            api_key="empty",
+        )
+        responses = [
+            (200, {"data": [{"id": "dsv4-0731"}]}),
+            (404, "not found"),
+            (200, 'data: {"choices":[{"delta":{"content":"好"}}]}\n\ndata: [DONE]'),
+            (
+                200,
+                'data: {"choices":[]}\n\n'
+                'data: {"choices":[],"usage":{"prompt_tokens":9}}\n\ndata: [DONE]',
+            ),
+        ]
+        mocker.patch(
+            "benchmark.run_benchmark._http_json",
+            side_effect=responses,
+        )
+        probe = probe_engine(engine)
+        assert probe["reachable"] is True
+        assert probe["model_listed"] is True
+        assert probe["release_endpoint"] is False
+        assert probe["streaming"] is True
+        assert probe["stream_usage"] is True
+
+    def test_probe_engine_stream_usage_missing(self, mocker):
+        engine = EngineConfig(
+            base_url="http://engine.test/v1",
+            engine_root="http://engine.test",
+            model="m",
+            api_key="",
+        )
+        responses = [
+            (200, {"data": [{"id": "m"}]}),
+            (200, "{}"),
+            (200, 'data: {"choices":[{"delta":{"content":"好"}}]}\n\ndata: [DONE]'),
+            (200, 'data: {"choices":[{"delta":{"content":"好"}}]}\n\ndata: [DONE]'),
+        ]
+        mocker.patch("benchmark.run_benchmark._http_json", side_effect=responses)
+        probe = probe_engine(engine)
+        assert probe["stream_usage"] is False
+        assert probe["streaming"] is True
+
+
+class TestBuildResilience:
+    def _engine(self) -> EngineConfig:
+        return EngineConfig(
+            base_url="http://engine.test/v1",
+            engine_root="http://engine.test",
+            model="m",
+            api_key="",
+        )
+
+    def test_build_error_captured_and_phase_skipped(self, mocker):
+        engine = self._engine()
+        mocker.patch(
+            "benchmark.oj_adapter.build_openjiuwen_agent",
+            side_effect=RuntimeError("openjiuwen API drift"),
+        )
+
+        async def build() -> None:
+            specs = await build_agents(["oj-baseline"], engine, 0, True)
+            assert specs[0].agent is None
+            assert "RuntimeError" in specs[0].build_error
+            args = SimpleNamespace(npu_cmd="", max_parallel=1, turn_timeout=10)
+            results, window = await run_agent_phase(specs[0], [], 0, args, "")
+            assert results == []
+            assert window.hit_rate_delta is None
+
+        asyncio.run(build())
+
+    def test_affinity_stats_accumulate_across_rounds(self, mocker):
+        """Counters reset on each round's fresh model; the summary must sum
+        them into a run-total instead of keeping only the last round."""
+        engine = self._engine()
+        args = SimpleNamespace(rounds=2, metrics_url=None, npu_cmd="")
+
+        class FakeModel:
+            affinity_stats = {"affinity_requests": 2, "salt_bound_requests": 1}
+
+        class FakeRecorder:
+            calls = []
+
+        def lc_build(names, _engine, round_idx, release_enabled):
+            del _engine, round_idx, release_enabled
+            return [
+                SimpleNamespace(
+                    name=name,
+                    kind="lc",
+                    agent=object(),
+                    recorder=FakeRecorder(),
+                    collector=None,
+                    affinity_source=FakeModel() if name == "lc-affinity" else None,
+                    build_error=None,
+                )
+                for name in names
+            ]
+
+        def skip_phase(spec, tasks, round_idx, args_, metrics_url):
+            del spec, tasks, round_idx, args_, metrics_url
+            return [], SimpleNamespace(
+                hit_rate_delta=None, cache_usage_peak=None, npu_samples=[]
+            )
+
+        mocker.patch("benchmark.run_benchmark.build_agents", side_effect=lc_build)
+        mocker.patch("benchmark.run_benchmark.run_agent_phase", side_effect=skip_phase)
+        data = asyncio.run(
+            run_benchmark(engine, [], ["lc-affinity"], args, release_enabled=False)
+        )
+        stats = data["summaries"]["lc-affinity"]["affinity_stats"]
+        assert stats["affinity_requests"] == 4  # 2 rounds x 2
+        assert stats["salt_bound_requests"] == 2
+
+    def test_build_error_surfaces_in_summary(self, mocker):
+        engine = self._engine()
+        args = SimpleNamespace(rounds=1, metrics_url=None, npu_cmd="")
+
+        def bad_build(names, _engine, round_idx, release_enabled):
+            del _engine, round_idx, release_enabled
+            return [
+                SimpleNamespace(
+                    name=names[0],
+                    kind="oj",
+                    agent=None,
+                    recorder=None,
+                    collector=SimpleNamespace(records=[], drop_warmup=lambda: None),
+                    affinity_source=None,
+                    build_error="ImportError: no openjiuwen",
+                )
+            ]
+
+        def skip_phase(spec, tasks, round_idx, args_, metrics_url):
+            del spec, tasks, round_idx, args_, metrics_url
+            return [], SimpleNamespace(
+                hit_rate_delta=None, cache_usage_peak=None, npu_samples=[]
+            )
+
+        mocker.patch("benchmark.run_benchmark.build_agents", side_effect=bad_build)
+        mocker.patch("benchmark.run_benchmark.run_agent_phase", side_effect=skip_phase)
+        data = asyncio.run(
+            run_benchmark(engine, [], ["oj-baseline"], args, release_enabled=False)
+        )
+        assert data["summaries"]["oj-baseline"]["build_error"] == "ImportError: no openjiuwen"

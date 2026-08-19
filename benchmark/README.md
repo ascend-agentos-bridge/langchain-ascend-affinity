@@ -59,7 +59,8 @@ Options:
 ## Engine interface requirements
 
 At start the runner probes the engine and prints the verdict
-(`model_listed / release_endpoint / streaming`). What each probe needs:
+(`model_listed / release_endpoint / streaming / stream_usage`). What each
+probe needs:
 
 Notation: `{base_url}` is the OpenAI-compatible base URL (`--engine-url`, `/v1`
 appended if missing); `{engine-root}` is the same origin without `/v1` (see the
@@ -71,24 +72,34 @@ in COMPATIBILITY.md).
 | reachability | `GET {base_url}/models` (any HTTP 200) | **yes** — exits with guidance |
 | model list | `GET {base_url}/models` returning `data[].id` | no — `model_listed=False` is printed; the run continues |
 | streaming | `POST /chat/completions` with `stream: true` (SSE `data:` frames) | no — but lc-pair TTFT degrades |
-| partial release | `POST {engine-root}/release_kv_cache` (404/405 = absent) | no — affinity release gain is lost, visible in `affinity_stats` |
+| stream usage | `POST /chat/completions` with `stream_options.include_usage: true` (a final SSE event carrying top-level `"usage"`) | no — when ✗, token-derived metrics (Prefill/Decode/KV hit/TPOT) render ➖; check whether a gateway strips `stream_options` |
+| partial release | `POST {engine-root}/release_kv_cache` (404/405 = absent) | no — release requests are **auto-disabled** (salt binding still applies); the lab sheet notes it |
 
 Beyond the probes, for trustworthy numbers:
 
 - **usage passthrough** — responses should carry
   `usage.prompt_tokens` / `completion_tokens` /
   `prompt_tokens_details.cached_tokens`; without `cached_tokens` the
-  client-side KV hit rate renders ➖.
+  client-side KV hit rate renders ➖. The harness reads `usage_metadata`
+  as both a dict (OpenAI-compatible) and a namespace (provider objects).
 - **affinity fields** — the engine must honour `cache_salt` /
   `cache_sharing` and the release endpoint per the
   [COMPATIBILITY.md contract](../COMPATIBILITY.md#11-interface-contract-sent-by-this-library);
   otherwise affinity degrades to a plain client and the lab sheet will
-  show it.
+  show it. The `cache_salt` must be bound *per call*: the runner passes
+  `session_id` via run metadata, which the affinity model resolves inside
+  `_generate`/`_agenerate` (streaming is routed through those methods so
+  the metadata is never dropped).
 - **no per-key rate limiting** — all four agents share one API key by
   design; RPM/TPM quotas on that key inject queuing noise into every
   latency figure. Lift the quota for the benchmark window.
 - optional engine/NPU metrics need `--metrics-url` (vLLM-style Prometheus
   `/metrics`) and `--npu-cmd` (a `key=value` sampler on the engine host).
+  Prefix-cache metric names are auto-discovered (V0 counters, V1
+  `prefix_cache_hit_rate` gauge, renamed usage metrics), so the same
+  harness works across vLLM / vLLM-Ascend / gateway-passthrough setups.
+- a framework that fails to build (e.g. openJiuwen not installed) is
+  reported as a `build_error` row instead of silently producing zero data.
 
 ## What it measures
 
@@ -102,7 +113,7 @@ Beyond the probes, for trustworthy numbers:
 | Decode tokens/s | decode tokens / decode time | |
 | KV hit rate / KV memory (engine) | `--metrics-url` Prometheus snapshot deltas | optional, ➖ when absent |
 | NPU utilization / bandwidth | `--npu-cmd` sampler | optional, ➖ when absent |
-| Affinity behaviour | `affinity_stats` (salt-bound, releases attempted/failed) | lc-affinity |
+| Affinity behaviour | `affinity_stats` (salt-bound, releases attempted/failed, accumulated across rounds) | lc-affinity |
 | Correctness | per-task expected-keyword hits, compared across agents | |
 
 Task set: 8 financial-advisor dialogues (rebalance / risk assessment /

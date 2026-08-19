@@ -224,6 +224,31 @@ class AscendAffinityChatModel(
         """Capability flag consumed by lifecycle schedulers (agent-core parity)."""
         return self.enable_agent_hint
 
+    def _should_stream(
+        self,
+        *,
+        async_api: bool,
+        run_manager: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> bool:
+        """Route ``invoke``/``ainvoke`` through ``_generate``/``_agenerate``.
+
+        langchain-core's ``_generate_with_cache`` streaming branch calls
+        ``_stream`` directly *without* the run manager, which would hide the
+        call's config metadata (``session_id`` -> ``cache_salt``) from the
+        affinity pipeline and silently degrade to an anonymous client. So for
+        ordinary generation we decline the framework's streaming branch and
+        stream internally (``_generate_from_stream``) where the run manager —
+        and therefore the cache salt — is visible. TTFT token callbacks and
+        chunk events are preserved either way.
+
+        Only an explicit ``stream=True`` (the ``stream()``/``astream()`` API)
+        keeps the framework streaming branch, which is unchanged from the base
+        class behaviour (and cannot bind a per-call salt by framework design).
+        """
+        del async_api, run_manager  # only the explicit-stream flag matters
+        return bool(kwargs.get("stream"))
+
     # -- idle auto-evict -------------------------------------------------------
 
     def _cancel_idle_evict_locked(self) -> None:
@@ -300,7 +325,7 @@ class AscendAffinityChatModel(
     ) -> ChatResult:
         session_id = self._resolve_session_id(run_manager, kwargs)
         self._cancel_idle_evict()
-        if self.streaming:
+        if self.streaming or kwargs.get("stream"):
             result = self._generate_from_stream(messages, stop, run_manager, kwargs)
         else:
             result = self._request(messages, stop, run_manager, kwargs)
@@ -314,8 +339,18 @@ class AscendAffinityChatModel(
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        # ``_generate`` runs in a worker thread, so it needs the sync
+        # counterpart of the run manager: ``get_sync()`` shares the same
+        # handlers AND carries the metadata (config session_id) the affinity
+        # pipeline resolves the cache salt from. The base ``_astream`` uses
+        # the same conversion, so callbacks stay thread-safe.
+        sync_manager = (
+            run_manager.get_sync() if run_manager is not None else None
+        )
         return await asyncio.to_thread(
-            functools.partial(self._generate, messages, stop, run_manager, **kwargs)
+            functools.partial(
+                self._generate, messages, stop, sync_manager, **kwargs
+            )
         )
 
     # -- streaming --------------------------------------------------------------

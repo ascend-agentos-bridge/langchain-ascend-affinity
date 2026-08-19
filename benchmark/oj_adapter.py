@@ -18,7 +18,7 @@ from __future__ import annotations
 import time
 from typing import Any, List
 
-from benchmark.metrics import CallMetrics
+from benchmark.metrics import CallMetrics, usage_field
 
 OJ_ADVISOR_INSTRUCTIONS = """你是一名严谨的中文投资顾问智能体，服务于零售客户。
 
@@ -61,7 +61,11 @@ class OJCallCollector:
         e2e_ms = round((time.perf_counter() - self._starts.pop()) * 1000.0, 1)
         response = getattr(getattr(ctx, "inputs", None), "response", None)
         usage = getattr(response, "usage_metadata", None)
-        details = getattr(usage, "input_token_details", None)
+        details = (
+            usage.get("input_token_details")
+            if isinstance(usage, dict)
+            else getattr(usage, "input_token_details", None)
+        )
         self.records.append(
             CallMetrics(
                 agent=self.agent_name,
@@ -69,9 +73,9 @@ class OJCallCollector:
                 round_idx=self._round_idx,
                 ttft_ms=None,
                 e2e_ms=e2e_ms,
-                prompt_tokens=getattr(usage, "input_tokens", None),
-                completion_tokens=getattr(usage, "output_tokens", None),
-                cached_tokens=getattr(details, "cache_read", None),
+                prompt_tokens=usage_field(usage, "input_tokens"),
+                completion_tokens=usage_field(usage, "output_tokens"),
+                cached_tokens=usage_field(details, "cache_read"),
             )
         )
 
