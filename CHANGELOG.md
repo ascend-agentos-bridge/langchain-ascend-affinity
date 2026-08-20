@@ -48,10 +48,13 @@
   生效，✗ 时报告提示 token 类指标缺失原因）；`affinity_stats` 改为跨轮累计；
   框架构建失败（如 openJiuwen 缺失）以 `build_error` 行显式标注而非静默零数据。
 - **benchmark 全链路运行日志**：新增 `--log-level`（默认 INFO）与
-  `--log-file`；每次 LLM 调用一行（TTFT/E2E/token 用量/`salt=yes|no`），
+  `--log-file`（默认 `benchmark/run.log`）；每次 LLM 调用一行（TTFT/E2E/token 用量/`salt=yes|no`），
   任务、阶段（含该轮亲和计数 `salt=绑定/总数`）、引擎窗口（命中率/KV/NPU）、
   预热与构建失败均有日志；`DEBUG` 级输出亲和管线每次请求的 salt/释放决策与
   请求体。报告附录引用日志文件路径。
+- **默认采集开箱即用**：`--metrics-url` 默认 `http://172.24.107.130:7000/metrics`，
+  `--log-file` 默认 `benchmark/run.log`，不再需要手动配置即可采集引擎侧指标
+  和运行日志；传 `--metrics-url ""` 可关闭引擎采集。
 
 ## [0.2.0] - 2026-08
 

@@ -55,11 +55,14 @@ Options:
 - `--api-key` (falls back to `ASCEND_API_KEY`, default `EMPTY` for local
   no-auth engines), `--max-parallel` (default 2), `--turn-timeout`
   (default 240 s), `--report-dir`.
+- `--metrics-url` (default `http://172.24.107.130:7000/metrics`): vLLM
+  `/metrics` endpoint — engine-side cache metrics are collected by default;
+  pass `--metrics-url ""` to disable.
 - `--log-level DEBUG|INFO|WARNING|ERROR` (default `INFO`): console log
   verbosity. `DEBUG` additionally shows the affinity pipeline's per-request
   salt/release decisions and request payloads.
-- `--log-file PATH`: also append the full run log (UTF-8) to a file; the
-  report's appendix links it.
+- `--log-file` (default `benchmark/run.log`): also append the full run log
+  (UTF-8) to a file; the report's appendix links it.
 
 ## Run log (full-chain observability)
 

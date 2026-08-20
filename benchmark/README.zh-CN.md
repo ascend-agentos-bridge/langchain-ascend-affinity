@@ -52,10 +52,12 @@ python benchmark/run_benchmark.py
 - `--api-key`（回退 `ASCEND_API_KEY`，本地无鉴权引擎默认 `EMPTY`）、
   `--max-parallel`（默认 2）、`--turn-timeout`（默认 240 秒）、
   `--report-dir`。
+- `--metrics-url`（默认 `http://172.24.107.130:7000/metrics`）：vLLM
+  `/metrics` 端点——默认采集引擎侧缓存指标；传 `--metrics-url ""` 可关闭。
 - `--log-level DEBUG|INFO|WARNING|ERROR`（默认 `INFO`）：控制台日志详细度。
   `DEBUG` 额外输出亲和管线每次请求的 salt 绑定/释放决策与请求体。
-- `--log-file PATH`：同时将完整运行日志（UTF-8）追加写入文件；报告附录会
-  引用该文件。
+- `--log-file`（默认 `benchmark/run.log`）：同时将完整运行日志（UTF-8）追加
+  写入文件；报告附录会引用该文件。
 
 ## 运行日志（全链路可观测）
 

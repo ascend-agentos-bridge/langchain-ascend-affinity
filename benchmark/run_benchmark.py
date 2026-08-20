@@ -834,8 +834,10 @@ def parse_args() -> argparse.Namespace:
         help="per-turn timeout (s)",
     )
     parser.add_argument(
-        "--metrics-url", default=None,
-        help="optional vLLM /metrics URL for engine-side cache metrics",
+        "--metrics-url",
+        default="http://172.24.107.130:7000/metrics",
+        help="vLLM /metrics URL for engine-side cache metrics "
+        "(default http://172.24.107.130:7000/metrics)",
     )
     parser.add_argument(
         "--npu-cmd", default=None,
@@ -852,8 +854,8 @@ def parse_args() -> argparse.Namespace:
         "per-request salt/release decisions and payloads",
     )
     parser.add_argument(
-        "--log-file", default=None,
-        help="also append the full run log to this file (UTF-8)",
+        "--log-file", default="benchmark/run.log",
+        help="append the full run log to this file (UTF-8; default benchmark/run.log)",
     )
     return parser.parse_args()
 
