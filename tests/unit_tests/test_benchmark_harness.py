@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ from benchmark.run_benchmark import (
     LlmCallRecord,
     TTFTRecorder,
     build_agents,
+    configure_logging,
     probe_engine,
     records_to_metrics,
     rotate,
@@ -633,3 +635,75 @@ class TestBuildResilience:
             run_benchmark(engine, [], ["oj-baseline"], args, release_enabled=False)
         )
         assert data["summaries"]["oj-baseline"]["build_error"] == "ImportError: no openjiuwen"
+
+
+class TestRunLogging:
+    def test_configure_logging_writes_file(self):
+        # tmp_path lives under the OS temp dir, which the dev sandbox denies;
+        # use a workspace-local dir and clean it up afterwards.
+        import benchmark.run_benchmark as runner
+
+        tmp_dir = Path(__file__).resolve().parents[2] / ".log-test-tmp"
+        tmp_dir.mkdir(exist_ok=True)
+        log_file = tmp_dir / "bench.log"
+        try:
+            configure_logging("INFO", str(log_file))
+            runner.logger.info("hello-bench-mark")
+            assert "hello-bench-mark" in log_file.read_text(encoding="utf-8")
+        finally:
+            configure_logging("INFO")  # closes the file handler
+            log_file.unlink(missing_ok=True)
+            try:
+                tmp_dir.rmdir()
+            except OSError:
+                pass
+
+    def test_recorder_logs_call_line_with_salt_flag(self, caplog):
+        recorder = TTFTRecorder("lc-affinity", 0)
+        run_id = uuid4()
+        recorder.on_llm_start(
+            {},
+            ["hi"],
+            run_id=run_id,
+            metadata={
+                "session_id": "bench-s1",
+                "bench_agent": "lc-affinity",
+                "bench_task": "t1",
+            },
+        )
+        recorder.on_llm_new_token("x", run_id=run_id)
+        response = SimpleNamespace(
+            generations=[
+                [
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            usage_metadata={
+                                "input_tokens": 7,
+                                "output_tokens": 3,
+                                "total_tokens": 10,
+                                "input_token_details": {"cache_read": 5},
+                            }
+                        )
+                    )
+                ]
+            ]
+        )
+        with caplog.at_level(logging.INFO, logger="benchmark.run_benchmark"):
+            recorder.on_llm_end(response, run_id=run_id)
+        messages = [r.message for r in caplog.records if "[llm]" in r.message]
+        assert messages and "salt=yes" in messages[0]
+        assert "prompt=7 comp=3 cached=5" in messages[0]
+        assert "t1" in messages[0]
+
+    def test_recorder_logs_salt_no_without_session(self, caplog):
+        recorder = TTFTRecorder("lc-baseline", 0)
+        run_id = uuid4()
+        recorder.on_llm_start({}, ["hi"], run_id=run_id, metadata={})
+        recorder.on_llm_new_token("x", run_id=run_id)
+        response = SimpleNamespace(
+            generations=[[SimpleNamespace(message=SimpleNamespace(usage_metadata=None))]]
+        )
+        with caplog.at_level(logging.INFO, logger="benchmark.run_benchmark"):
+            recorder.on_llm_end(response, run_id=run_id)
+        messages = [r.message for r in caplog.records if "[llm]" in r.message]
+        assert messages and "salt=no" in messages[0]

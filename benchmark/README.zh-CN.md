@@ -52,6 +52,42 @@ python benchmark/run_benchmark.py
 - `--api-key`（回退 `ASCEND_API_KEY`，本地无鉴权引擎默认 `EMPTY`）、
   `--max-parallel`（默认 2）、`--turn-timeout`（默认 240 秒）、
   `--report-dir`。
+- `--log-level DEBUG|INFO|WARNING|ERROR`（默认 `INFO`）：控制台日志详细度。
+  `DEBUG` 额外输出亲和管线每次请求的 salt 绑定/释放决策与请求体。
+- `--log-file PATH`：同时将完整运行日志（UTF-8）追加写入文件；报告附录会
+  引用该文件。
+
+## 运行日志（全链路可观测）
+
+默认 `INFO` 级别下，控制台按"每次 LLM 调用 / 每个任务 / 每个 agent 阶段 /
+每个引擎窗口"各打一行——所有"静默失败"（salt 未绑定、usage 缺失、框架
+被吞）都能当场看见：
+
+```
+[run] engine=http://.../v1 model=dsv4-0731 agents=['lc-baseline', ...] rounds=3
+[probe] {"reachable": true, "model_listed": true, "release_endpoint": false, "streaming": true, "stream_usage": false}
+=== round 1/3 order=[...] ===
+[llm] r0 lc-affinity rebalance-C1001 ttft=1,112ms e2e=8,470ms prompt=1,203 comp=412 cached=0 salt=yes
+[task] r0 lc-affinity rebalance-C1001 ok hits=2/3 turns=4 e2e=37,472ms
+[phase] r0 lc-affinity: tasks=8 llm_calls=44 ttft_mean=1,615ms e2e_mean=8,188ms salt=45/45 releases=0/0
+[engine] r0 lc-affinity hit_rate_delta=62.5% cache_usage_peak=0.872 npu=[{'util': 57.5}]
+```
+
+- `[llm]` —— 每次 LLM 调用一行：TTFT / E2E / prompt / completion / cached
+  tokens，以及 `salt=yes|no`（本次调用是否携带会话 ID——`yes` 是
+  `cache_salt` 绑定的前提）。引擎（或网关）不返回 usage 时
+  `prompt/comp/cached` 显示 `None`。
+- `[task]` —— 任务结果：关键词命中与总 E2E。
+- `[phase]` —— 每 agent 每轮：调用量、均值与该轮亲和计数
+  （`salt=绑定数/总数`、`releases=尝试/失败`）。**`salt=44/44`
+  （绑定数=总数）即证明每次请求都绑定了 salt。**
+- `[engine]` —— 引擎侧前缀命中率 / KV 占用 / NPU 采样（仅配置了
+  `--metrics-url` / `--npu-cmd` 时出现）。
+- `[warmup]` / `[build]` —— 预热结果与 agent 构建失败（如 openJiuwen
+  缺失），否则这些失败会被静默吞掉。
+
+`--log-level DEBUG` 时，亲和模型自身还会输出每次 salt 绑定与释放决策
+（会话、释放下标）及请求体——当 `[phase]` 行出现 `salt=0/N` 时用它排查。
 
 ## 引擎接口要求
 

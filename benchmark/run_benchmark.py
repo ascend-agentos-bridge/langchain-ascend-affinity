@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -71,6 +72,45 @@ VERDICT_METRICS = (
     "tpot_mean_ms",
     "decode_tps",
 )
+
+logger = logging.getLogger(__name__)
+
+_LOG_FORMAT = "%(asctime)s %(levelname)-5s %(message)s"
+_LOG_DATE_FORMAT = "%H:%M:%S"
+_LOG_HANDLERS: List[logging.Handler] = []
+
+
+def configure_logging(level: str, log_file: Optional[str] = None) -> None:
+    """Route benchmark + affinity-pipeline logs to stderr (and a file).
+
+    ``level`` is a logging level name (``DEBUG`` / ``INFO`` / ...). At
+    ``DEBUG`` the affinity model's per-request salt/release decisions and
+    request payloads are also emitted. Idempotent: calling again replaces
+    the previously installed handlers without touching handlers that other
+    frameworks (pytest, langsmith) attached to the root logger.
+    """
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    for handler in _LOG_HANDLERS:
+        root.removeHandler(handler)
+        handler.close()
+    _LOG_HANDLERS.clear()
+    stream = logging.StreamHandler(sys.stderr)
+    stream.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
+    root.addHandler(stream)
+    _LOG_HANDLERS.append(stream)
+    if log_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(
+            logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
+        )
+        root.addHandler(file_handler)
+        _LOG_HANDLERS.append(file_handler)
+
+
+def _fmt_ms(value: Optional[float]) -> str:
+    """Render a millisecond value compactly for log lines."""
+    return "n/a" if value is None else f"{value:,.0f}ms"
 
 
 @dataclass
@@ -141,6 +181,12 @@ class TTFTRecorder(BaseCallbackHandler):
             meta.get("bench_task", "?")
         )
 
+    @staticmethod
+    def _session_bound(metadata: Optional[Dict[str, Any]]) -> bool:
+        """True when the run metadata carries a session id (salt expected)."""
+        meta = metadata or {}
+        return any(meta.get(key) for key in ("session_id", "session", "conversation_id"))
+
     def on_llm_start(
         self,
         serialized: Dict[str, Any],
@@ -156,6 +202,7 @@ class TTFTRecorder(BaseCallbackHandler):
             "agent": agent,
             "task": task,
             "first": None,
+            "session": self._session_bound(metadata),
         }
 
     def on_llm_new_token(
@@ -173,8 +220,19 @@ class TTFTRecorder(BaseCallbackHandler):
         entry = self._active.pop(run_id, None) if run_id is not None else None
         if entry is None:
             return
-        self.calls.append(
-            _record_from_response(entry, run_id, response, self.round_idx)
+        record = _record_from_response(entry, run_id, response, self.round_idx)
+        self.calls.append(record)
+        logger.info(
+            "[llm] r%s %s %s ttft=%s e2e=%s prompt=%s comp=%s cached=%s salt=%s",
+            self.round_idx,
+            record.agent,
+            record.task_id,
+            _fmt_ms(record.ttft_ms),
+            _fmt_ms(record.e2e_ms),
+            record.prompt_tokens,
+            record.completion_tokens,
+            record.cached_tokens,
+            "yes" if entry.get("session") else "no",
         )
 
 
@@ -440,7 +498,22 @@ async def run_oj_task(
 async def run_task(spec: AgentSpec, task: Any, round_idx: int, timeout: float) -> TaskResult:
     """Dispatch one task to the right framework runner."""
     runner = run_lc_task if spec.kind == "lc" else run_oj_task
-    return await runner(spec, task, round_idx, timeout)
+    result = await runner(spec, task, round_idx, timeout)
+    status = "error" if result.error else "ok"
+    total_e2e = f"{sum(result.turn_e2e_ms):,.0f}ms" if result.turn_e2e_ms else "n/a"
+    logger.info(
+        "[task] r%s %s %s %s hits=%s/%s turns=%s e2e=%s%s",
+        round_idx,
+        spec.name,
+        task.task_id,
+        status,
+        result.keyword_hits,
+        result.keywords_total,
+        len(result.turn_e2e_ms),
+        total_e2e,
+        f" ({result.error})" if result.error else "",
+    )
+    return result
 
 
 async def run_warmup(spec: AgentSpec, round_idx: int) -> None:
@@ -474,7 +547,9 @@ async def run_warmup(spec: AgentSpec, round_idx: int) -> None:
                 ),
                 timeout=120,
             )
+        logger.info("[warmup] r%s %s ok", round_idx, spec.name)
     except Exception as exc:  # warm-up failures never abort the benchmark
+        logger.warning("[warmup] r%s %s failed: %s", round_idx, spec.name, exc)
         print(f"[warmup] {spec.name}: {exc}", flush=True)
 
 
@@ -645,10 +720,12 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
                 call_metrics = list(spec.collector.records)
                 records = list(call_metrics)
             per_agent_records[spec.name].extend(records)
-            per_agent_rounds[spec.name].append(aggregate(call_metrics))
+            round_metrics = aggregate(call_metrics)
+            per_agent_rounds[spec.name].append(round_metrics)
             windows[spec.name].append(window)
             if spec.build_error:
                 build_errors[spec.name] = spec.build_error
+            stats: Dict[str, int] = {}
             if spec.affinity_source is not None:
                 # counters reset per round on a fresh model: accumulate so the
                 # report shows the run-total, not just the last round
@@ -657,6 +734,35 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
                 affinity_stats[spec.name] = {
                     key: previous.get(key, 0) + value for key, value in stats.items()
                 }
+            logger.info(
+                "[phase] r%s %s: tasks=%s llm_calls=%s ttft_mean=%s e2e_mean=%s%s%s",
+                round_idx,
+                spec.name,
+                len(round_results),
+                round_metrics.llm_calls,
+                _fmt_ms(round_metrics.ttft_mean_ms),
+                _fmt_ms(round_metrics.e2e_mean_ms),
+                f" salt={stats.get('salt_bound_requests', 0)}/"
+                f"{stats.get('affinity_requests', 0)}"
+                f" releases={stats.get('releases_attempted', 0)}/"
+                f"{stats.get('releases_failed', 0)}"
+                if stats
+                else "",
+                f" build_error={spec.build_error}" if spec.build_error else "",
+            )
+            if (
+                window.hit_rate_delta is not None
+                or window.cache_usage_peak is not None
+                or any(window.npu_samples)
+            ):
+                logger.info(
+                    "[engine] r%s %s hit_rate_delta=%s%% cache_usage_peak=%s npu=%s",
+                    round_idx,
+                    spec.name,
+                    window.hit_rate_delta,
+                    window.cache_usage_peak,
+                    window.npu_samples,
+                )
     summaries: Dict[str, Dict[str, Any]] = {}
     for name in agent_names:
         rounds_metrics = per_agent_rounds[name]
@@ -739,6 +845,16 @@ def parse_args() -> argparse.Namespace:
         "--report-dir", default=str(_REPORT_DIR_DEFAULT),
         help="report output dir",
     )
+    parser.add_argument(
+        "--log-level", default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="console log verbosity: DEBUG adds the affinity pipeline's "
+        "per-request salt/release decisions and payloads",
+    )
+    parser.add_argument(
+        "--log-file", default=None,
+        help="also append the full run log to this file (UTF-8)",
+    )
     return parser.parse_args()
 
 
@@ -791,14 +907,20 @@ def run_setup() -> None:
 def main() -> None:
     """One-click entry: setup -> probe -> rounds of 4 agents -> lab report."""
     args = parse_args()
+    configure_logging(args.log_level, args.log_file)
     if args.setup:
         run_setup()
     engine = resolve_engine(args)
     agent_names = resolve_agents(args.agents)
     from benchmark.tasks import load_longrun_tasks, load_tasks, task_fingerprint
 
+    logger.info(
+        "[run] engine=%s model=%s agents=%s rounds=%s",
+        engine.base_url, engine.model, agent_names, args.rounds,
+    )
     print(f"[probe] {engine.base_url} model={engine.model}")
     probe = probe_engine(engine)
+    logger.info("[probe] %s", json.dumps(probe, ensure_ascii=False))
     if not probe.get("reachable"):
         print(
             f"[probe] 引擎不可达：{probe.get('error')}\n"
@@ -836,6 +958,7 @@ def main() -> None:
         fingerprint=fingerprint,
     )
     print(f"\n报告：{md_path}")
+    logger.info("[run] done: %s", md_path)
     failed = any(result.error for result in data["results"])
     sys.exit(1 if failed else 0)
 

@@ -251,8 +251,13 @@ def render_report_md(
         "## 8. 附录",
         "",
         f"- 每次调用的原始记录（时延+token 用量）：`{json_name}`",
-        "",
     ]
+    log_file = getattr(args, "log_file", None)
+    if log_file:
+        sections.append(
+            f"- 运行日志（全链路，含每次 LLM 调用与亲和计数）：`{log_file}`"
+        )
+    sections.append("")
     return "\n".join(sections)
 
 

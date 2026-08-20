@@ -15,10 +15,13 @@ so TTFT/TPOT render as N/A on the lab sheet for openJiuwen agents.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, List
 
 from benchmark.metrics import CallMetrics, usage_field
+
+logger = logging.getLogger(__name__)
 
 OJ_ADVISOR_INSTRUCTIONS = """你是一名严谨的中文投资顾问智能体，服务于零售客户。
 
@@ -77,6 +80,16 @@ class OJCallCollector:
                 completion_tokens=usage_field(usage, "output_tokens"),
                 cached_tokens=usage_field(details, "cache_read"),
             )
+        )
+        logger.info(
+            "[llm] r%s %s %s ttft=n/a e2e=%.0fms prompt=%s comp=%s cached=%s",
+            self._round_idx,
+            self.agent_name,
+            self._task_id,
+            e2e_ms,
+            usage_field(usage, "input_tokens"),
+            usage_field(usage, "output_tokens"),
+            usage_field(details, "cache_read"),
         )
 
 
