@@ -29,7 +29,10 @@ def build_baseline_model(
 
     ``streaming=True`` makes invoke() aggregate an SSE stream internally,
     emitting on_llm_new_token callbacks so client-side TTFT is measurable
-    (identical sampling on both sides of the pair).
+    (identical sampling on both sides of the pair). ``stream_usage=True``
+    requests ``stream_options.include_usage`` so token metrics (prefill /
+    decode / TPOT / KV hit rate) are comparable with the affinity side —
+    without it, custom-base_url ChatOpenAI silently drops usage by default.
     """
     from langchain_openai import ChatOpenAI  # pylint: disable=import-error  # benchmark/requirements.txt
 
@@ -40,6 +43,7 @@ def build_baseline_model(
         temperature=0.3,
         timeout=timeout,
         streaming=True,
+        stream_usage=True,
     )
 
 
@@ -50,6 +54,7 @@ def build_affinity_model(
     api_key: str = "EMPTY",
     timeout: float = 120.0,
     release_enabled: bool = True,
+    salt_enabled: bool = True,
 ) -> Any:
     """Affinity chat model (salt binding + prefix diff + partial release).
 
@@ -59,6 +64,11 @@ def build_affinity_model(
     ``release_enabled=False`` (engine probe found no ``/release_kv_cache``)
     disables release requests while keeping salt binding and prefix tracking,
     so engines without the agent-core endpoint don't collect 404 noise.
+
+    ``salt_enabled=False`` (engine probe ``salt_tool_calls`` rejected
+    salt-bound tool-call requests) keeps the pipeline counters but never
+    injects ``cache_sharing``/``cache_salt``, so tool-calling agents run as a
+    plain OpenAI client instead of failing with engine HTTP 501s.
     """
     from langchain_ascend import AscendAffinityChatModel
 
@@ -70,6 +80,7 @@ def build_affinity_model(
         timeout=timeout,
         streaming=True,
         release_endpoint="/release_kv_cache" if release_enabled else "",
+        salt_enabled=salt_enabled,
     )
 
 

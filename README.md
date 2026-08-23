@@ -107,6 +107,7 @@ partial release.
 | `model` | `ascend-chat` | model name advertised to the engine |
 | `session_id` | `None` | fallback salt for single-session apps |
 | `enable_affinity` | `True` | `False` = plain OpenAI-compatible client |
+| `salt_enabled` | `True` | `False` = keep the pipeline counters but never inject `cache_sharing` / `cache_salt` (engines that reject salt-bound tool-call requests, see below) |
 | `release_endpoint` | `/release_kv_cache` | partial-release path on the engine root; `""` disables |
 | `enable_agent_hint` | `False` | opt into the agent_hint lifecycle protocol (identity fields + `evict` / `offload` / `prefetch` management) |
 | `idle_evict_after_seconds` | `0` | auto-evict the session's KV cache after this many seconds idle (`0` = off; requires `enable_agent_hint`) |
@@ -129,7 +130,12 @@ Works with any OpenAI-compatible engine; the affinity gain depends on the
 engine consuming the affinity fields (`cache_salt`, `/release_kv_cache`).
 Degradation is always safe: engines that ignore unknown fields treat
 requests as plain OpenAI calls, and release failures stay non-fatal
-warnings.
+warnings. Engines that actively *reject* the affinity fields (observed:
+HTTP 501 on `cache_salt` + tool-call messages, MindIE-class servers) are
+handled automatically — the request is retried once without the salt
+fields and salt binding is then disabled for the instance
+(`salt_degraded_requests` counter + warning), so tool-calling agents keep
+working as a plain OpenAI client.
 
 Which engine versions support what (MindIE, vLLM-Ascend), the full
 interface contract, protocol compatibility with openjiuwen agent-core, and
@@ -147,6 +153,7 @@ the same numbers the benchmark reports:
 |---|---|
 | `affinity_requests` | requests that entered the affinity pipeline |
 | `salt_bound_requests` | requests actually salt-bound to a session |
+| `salt_degraded_requests` | requests retried without salt after the engine rejected a salt-bound request (HTTP 501); salt binding is then disabled for the instance |
 | `releases_attempted` | partial KV-release requests sent |
 | `releases_failed` | release requests that failed (never fatal) |
 | `management_requests` | agent_hint `evict` / `offload` / `prefetch` requests sent |

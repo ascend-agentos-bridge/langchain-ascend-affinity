@@ -57,7 +57,15 @@
 挤进同一个共享缓存桶，存在跨会话 KV 污染风险。
 
 降级始终安全：符合规范的网关会忽略未知字段，释放失败仅产生非致命告警，
-模型作为普通 OpenAI 客户端照常工作。
+模型作为普通 OpenAI 客户端照常工作。引擎**主动拒绝**亲和字段时同样如此
+（2026-08-20 真机运行实测）：MindIE 类服务器对携带
+`cache_sharing` / `cache_salt` 且 messages 含工具调用（assistant
+`tool_calls` / `tool` 角色）的 `/v1/chat/completions` 请求返回 **HTTP 501
+Not Implemented**——纯消息 + salt 正常，工具消息无 salt 也正常。客户端
+自动降级：被拒请求去掉 salt 字段重试一次，随后该实例禁用 salt 绑定
+（`salt_degraded_requests` 计数 + WARNING 日志），生成以普通 OpenAI
+客户端继续；`salt_enabled=False` 可在能力探测（`salt_tool_calls`）已判定
+不支持时预先禁用，benchmark 会先探测该组合并在化验单上如实标注。
 
 ## 2. 版本匹配列表
 
@@ -89,7 +97,7 @@
 |---|---|---|
 | **完整 release 协议（4/4 契约）**：openjiuwen release 协议 × vLLM-Ascend v0.15 + PR #6722 补丁 | chat + salt + metrics + release | 唯一能拿到"部分释放"收益的组合；需自行携带 patch，无官方 release |
 | **salt 档（3/4 契约）**：openjiuwen 任意版本 × vLLM-Ascend ≥ v0.9.1（stock） | chat + salt + metrics | **当前推荐的真实引擎验证平台**：salt 隔离与跨轮命中真实生效；release 404 属预期 |
-| **全局缓存档（1/4 契约）**：openjiuwen 任意版本 × MindIE 任意版本（stock） | 仅 chat | 亲和字段被安全忽略；只剩引擎全局内容哈希前缀缓存（叠加约束见 3.2） |
+| **全局缓存档（1/4 契约）**：openjiuwen 任意版本 × MindIE 任意版本（stock） | 仅 chat | 纯消息请求亲和字段被安全忽略，但 **salt + 工具调用请求被主动拒绝（HTTP 501，2026-08-20 实测）**——客户端自动降级；只剩引擎全局内容哈希前缀缓存（叠加约束见 3.2） |
 | **生命周期档**：openjiuwen develop（agent_hint）× 华为内部自研 vLLM | agent_hint 全量 | 公开生态不可复现，等待引擎侧跟进或 PR #6722 类补丁扩展 |
 
 ## 3. 不匹配时的收益失效分析
@@ -98,7 +106,7 @@
 
 | # | 亲和机制 | 依赖的引擎能力 | vLLM-Ascend ≥ 0.9.1（stock） | + PR #6722 | MindIE ≤ 3.1.0（stock） | 失效后果 |
 |---|---|---|---|---|---|---|
-| 1 | 会话盐绑定（`cache_salt`） | 引擎消费 salt，注入首块哈希 | ✅ 生效 | ✅ | ❌ 忽略 | MindIE：无会话隔离命名空间，跨会话 KV 混布于全局缓存，隔离收益 = 0 |
+| 1 | 会话盐绑定（`cache_salt`） | 引擎消费 salt，注入首块哈希 | ✅ 生效 | ✅ | ❌ 忽略；**salt + 工具调用消息组合被主动拒绝（HTTP 501，2026-08-20 实测）** → 客户端自动降级为普通客户端 | MindIE：无会话隔离命名空间，跨会话 KV 混布于全局缓存，隔离收益 = 0；工具调用型 agent 若无客户端的 salt 拒绝降级将整轮 501 |
 | 2 | `cache_sharing` 标记 | 引擎消费（非标字段） | ⚠️ 忽略（无害） | ✅ | ⚠️ 忽略（无害） | 无独立收益，仅伴随 salt 生效 |
 | 3 | 前缀差异检测（prefix diff） | 无（纯客户端） | ✅ 始终工作 | ✅ | ✅ 始终工作 | 无失效；但 release 不可用时检测结果无处上报 |
 | 4 | 部分释放（`/release_kv_cache`） | 引擎端点 | ❌ 404 | ✅ | ❌ 404 | **历史改写场景收益全失效**：脏 KV 块滞留显存只能等 LRU 逐出；`releases_failed` 持续增长属预期，非故障 |
@@ -113,7 +121,7 @@
 |---|---|---|---|
 | vLLM-Ascend ≥ 0.9.1（stock） | 工具调用间隙同 salt 跨轮命中 ↑、prefill ↓、TTFT ↓（**真实可测**）；跨会话隔离 | 部分释放、agent_hint 全部生命周期管理；显存压力下 salt 桶仍会被 LRU 逐出（salt 是隔离命名空间，不是驻留保证） | benchmark 中 affinity 配对 KV 命中率/prefill 应见差异；`releases_failed` 增长属预期 |
 | vLLM-Ascend + PR #6722 | 上述全部 + 改写历史的精确释放（脏块即弃，腾槽位给活跃会话） | agent_hint 生命周期管理（插件不实现） | release 计数应转为成功 |
-| MindIE（stock） | 仅引擎全局 prefix cache 的公共前缀命中（系统提示词、工具定义等），无会话隔离 | salt 隔离、部分释放、生命周期管理全部失效。**注意叠加约束**：MindIE prefix cache 不支持与 function call(multiturn)、context parallel + sequence parallel 叠加——工具调用型 agent 可能连公共前缀命中都拿不到，收益趋零 | salt 绑定与 release 指标为 0/失败属预期；若开启 Prefix Cache 插件可对照 `--metrics-url` 验证残留收益 |
+| MindIE（stock） | 仅引擎全局 prefix cache 的公共前缀命中（系统提示词、工具定义等），无会话隔离 | salt 隔离、部分释放、生命周期管理全部失效。**注意叠加约束**：MindIE prefix cache 不支持与 function call(multiturn)、context parallel + sequence parallel 叠加——工具调用型 agent 可能连公共前缀命中都拿不到，收益趋零。**主动拒绝**：`cache_salt` + 工具调用消息返回 HTTP 501（2026-08-20 实测）——客户端自动降级（去 salt 重试后本实例禁用 salt），benchmark 经 `salt_tool_calls` 探测预先禁用 salt | salt 绑定与 release 指标为 0/失败属预期；若开启 Prefix Cache 插件可对照 `--metrics-url` 验证残留收益；affinity agent 的 `salt_degraded_requests` > 0 即标记该自动降级 |
 | 华为内部自研 vLLM | agent_hint 全量（身份 + evict/offload/prefetch + 推理后管理） | —（公开生态无法验证） | 不适用 |
 
 ### 3.3 结论
@@ -146,6 +154,14 @@
 provider）/ Kong（同协议）→ LiteLLM / New API（按上表配置）→ 规避 One API
 模型重定向。**任何网关变更后，先跑一次 benchmark 的 release-endpoint 探测
 与 `affinity_stats` 核对**，确认 salt 绑定数非零、release 不被网关拦截。
+
+**探测注意事项——SPA catch-all 前端**（实测 `models.ascend.huawei.com`，
+nginx/1.21.5）：部分网关对**任意未知路径**（`/release_kv_cache`、
+`/version`、`/health`、`/metrics`）一律返回 **200 + 前端 index.html**，
+朴素的"200 = 端点存在"判断会误报。benchmark 探测把 HTML 响应一律视为
+"端点不存在"（`release_endpoint=false`），引擎身份块回退为"未知"；
+亲和字段是否被接受仍可通过真实 chat 路由验证（`salt_tool_calls` /
+`stream_usage` 探测）。
 
 ## 5. 维护规则
 

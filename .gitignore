@@ -33,3 +33,4 @@ Thumbs.db
 
 # Benchmark report outputs
 benchmark/reports/
+benchmark/run.log

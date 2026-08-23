@@ -33,12 +33,14 @@ class AffinityPipelineMixin:
 
     # -- helpers for the type checker (these live on the owning BaseChatModel) --
     _affinity_stats: Dict[str, int]
+    _salt_degraded: bool
     _prefix_tracker: Any
     model: str
     temperature: float
     top_p: float
     max_tokens: Optional[int]
     enable_affinity: bool
+    salt_enabled: bool
     enable_agent_hint: bool
     release_endpoint: str
 
@@ -85,6 +87,16 @@ class AffinityPipelineMixin:
             # without a salt would put every anonymous request into one
             # shared cache bucket and risk cross-session KV pollution.
             logger.debug("affinity skipped: no session bound")
+            return
+        if not self.salt_enabled:
+            # Engine capability probe rejected salt + tool-call requests:
+            # keep the pipeline counters but never inject the salt fields.
+            logger.debug("affinity skipped: salt binding disabled")
+            return
+        if self._salt_degraded:
+            # A previous 501 rejection locked the degradation for this
+            # instance; requests keep flowing as a plain OpenAI client.
+            logger.debug("affinity skipped: salt binding disabled after engine rejection")
             return
         self._affinity_stats["salt_bound_requests"] += 1
         payload["cache_sharing"] = True

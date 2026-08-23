@@ -50,7 +50,9 @@ Agent 与推理引擎之间存在天然的信息不对称：
 | **空闲自动 evict** | 生成后空闲超过 `idle_evict_after_seconds`（默认 0=关）自动 `evict_kvc`；新请求取消重排 | 配置启用 |
 
 两条协议均**安全降级**：引擎忽略未知字段即退化为普通 OpenAI 请求；
-管理失败仅计数/告警，绝不中断生成。
+引擎**主动拒绝**亲和字段时（实测 MindIE 类服务器对 salt + 工具调用消息
+组合返回 HTTP 501）客户端自动去掉 salt 字段重试并禁用本实例 salt 绑定，
+同样不中断生成；管理失败仅计数/告警，绝不中断生成。
 
 ### 1.3 生效调用链
 
@@ -102,13 +104,16 @@ baseline 只能让引擎留着一整段脏缓存，亲和路径则精确释放�
 - MindIE 全版本（≤ 3.1.0）：无 salt、无 release、无 agent_hint；其
   Prefix Cache 插件为内容哈希跨会话复用，且有叠加约束（不能与
   function call(multiturn)、context+sequence parallel 叠加）——工具
-  调用型 agent 可能连公共前缀命中都拿不到。
+  调用型 agent 可能连公共前缀命中都拿不到；且 **salt + 工具调用消息
+  组合会被 HTTP 501 主动拒绝**（2026-08-20 实测），客户端自动降级
+  （详见 COMPATIBILITY 第 1.1/3.1 节）。
 
 对读报告的含义：**vLLM-Ascend ≥ 0.9.1 = 契约 3/4**（chat + salt +
 metrics），release 404、`releases_failed` 增长属预期，不代表 salt 失效；
-**存量 MindIE = 契约 1/4**，salt 绑定为 0 属预期；**4/4 完整亲和**需带
-补丁的定制引擎。这正是本基准测试要区分的三种结果：**真亲和 / 部分收益
-（纯前缀缓存）/ 假亲和**。
+**存量 MindIE = 契约 1/4**，salt 绑定为 0 属预期（salt+工具请求被 501
+拒绝时 affinity agent 的 `salt_degraded_requests` > 0 即标记自动降级）；
+**4/4 完整亲和**需带补丁的定制引擎。这正是本基准测试要区分的三种结果：
+**真亲和 / 部分收益（纯前缀缓存）/ 假亲和**。
 
 ---
 

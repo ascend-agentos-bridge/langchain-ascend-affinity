@@ -46,6 +46,22 @@ def _version_of(package: str) -> str:
         return "?"
 
 
+def _identity_summary(probe: Dict[str, Any]) -> str:
+    """Best-effort engine type/version fingerprint for the report header."""
+    identity = probe.get("identity") or {}
+    engine_type = identity.get("engine_type") or "未知"
+    version = identity.get("version") or "未提供"
+    signals: List[str] = []
+    if identity.get("version_endpoint"):
+        signals.append("/version=200")
+    if identity.get("health"):
+        signals.append("/health=200")
+    if identity.get("server_header"):
+        signals.append(f"Server={identity['server_header']}")
+    basis = "；".join(signals) if signals else "无可用信号"
+    return f"类型={engine_type}，版本={version}（探测依据：{basis}）"
+
+
 def _render_lab_sheet(
     pair_name: str, affinity: Dict[str, Any], baseline: Dict[str, Any]
 ) -> List[str]:
@@ -130,7 +146,9 @@ def _render_correctness(
 
 
 def _render_affinity_evidence(
-    summaries: Dict[str, Dict[str, Any]], agent_names: List[str]
+    summaries: Dict[str, Dict[str, Any]],
+    agent_names: List[str],
+    probe: Dict[str, Any],
 ) -> List[str]:
     rows = ["## 6. 亲和行为证据", ""]
     for name in agent_names:
@@ -140,6 +158,16 @@ def _render_affinity_evidence(
         rows.append(
             f"- **{name}** 亲和计数（全程累计）：{stats or '（openJiuwen 侧见引擎日志）'}"
         )
+        if (
+            name == "lc-affinity"
+            and stats.get("salt_bound_requests", 0) == 0
+            and not probe.get("salt_tool_calls")
+        ):
+            rows.append(
+                "  - salt 绑定为 0：引擎探测 `salt_tool_calls=✗`，salt 绑定被"
+                "自动禁用（引擎拒绝 cache_salt + 工具调用请求，HTTP 501），"
+                "affinity 以普通客户端运行，属安全降级。"
+            )
         hit_rates = [
             window.get("hit_rate_delta")
             for window in summaries[name]["engine_windows"]
@@ -189,6 +217,7 @@ def render_report_md(
         "",
         f"- 时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 引擎：`{engine.base_url}`（模型 `{engine.model}`）",
+        f"- 引擎身份（探测，尽力而为）：{_identity_summary(probe)}",
         f"- 框架：deepagents {_version_of('deepagents')}, "
         f"langchain {_version_of('langchain')}, "
         f"openjiuwen {_version_of('openjiuwen')}, "
@@ -204,6 +233,12 @@ def render_report_md(
         f"（模型在列表中：{'✓' if probe.get('model_listed') else '✗'}）",
         f"- `/release_kv_cache`：{'✓' if probe.get('release_endpoint') else '✗'}"
         f"（缺失时自动禁用 release 请求，仅保留 cache_salt 绑定）",
+        (
+            f"- salt+工具调用（cache_salt + tool messages）："
+            f"{'✓' if probe.get('salt_tool_calls') else '✗'}"
+            "（✗ 时引擎拒绝带 salt 的工具调用请求 → 自动禁用 salt 绑定，"
+            "affinity 退化为普通客户端，工具任务照常执行）"
+        ),
         f"- 流式输出：{'✓' if probe.get('streaming') else '✗'}",
         (
             f"- 流式 usage（include_usage）：{'✓' if probe.get('stream_usage') else '✗'}"
@@ -233,7 +268,7 @@ def render_report_md(
         "",
         *_render_correctness(tasks, results, agent_names, summaries),
         "",
-        *_render_affinity_evidence(summaries, agent_names),
+        *_render_affinity_evidence(summaries, agent_names, probe),
         "",
         "## 7. 如何读本报告（判定规则）",
         "",
@@ -290,6 +325,10 @@ def write_reports(
                 },
                 "probe": probe,
                 **data,
+                # TaskResult dataclasses are not JSON-serializable; convert at
+                # the serialization boundary (internal code keeps attribute
+                # access on the objects).
+                "results": [asdict(result) for result in data["results"]],
             },
             ensure_ascii=False,
             indent=2,

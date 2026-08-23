@@ -2,3 +2,7 @@
 deepagents>=0.2
 langchain-openai>=1.0
 langchain>=1.0
+# The oj-* agents additionally require the proprietary openjiuwen package
+# (internal index, not published on PyPI):
+#   pip install openjiuwen
+# Without it those two agents are skipped and reported as build failures.

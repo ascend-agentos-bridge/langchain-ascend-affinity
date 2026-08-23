@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any, Dict, List
+from urllib.error import HTTPError
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from langchain_ascend import AscendAffinityChatModel
@@ -446,6 +448,7 @@ class TestAffinityStats:
             "releases_failed": 1,
             "management_requests": 0,
             "management_failed": 0,
+            "salt_degraded_requests": 0,
         }
 
     def test_stats_property_returns_copy(self, chat_llm, mocker):
@@ -466,7 +469,104 @@ class TestAffinityStats:
             "releases_failed": 0,
             "management_requests": 0,
             "management_failed": 0,
+            "salt_degraded_requests": 0,
         }
+
+
+class TestSaltRejectionDegradation:
+    """MindIE-class engines reject salt-bound tool-call requests with HTTP 501
+    (observed on the 2026-08-20 real-engine run: 18 failed tool tasks while the
+    no-salt 0818 run had zero). The client must retry once without the salt
+    fields and then stop binding salt for the instance."""
+
+    @staticmethod
+    def _http_501() -> HTTPError:
+        return HTTPError(
+            "http://engine.test/v1/chat/completions", 501, "Not Implemented", None, None
+        )
+
+    def test_501_retries_without_salt_then_disables_binding(self, chat_llm, mocker):
+        ok = {"choices": [{"message": {"content": "ok"}}]}
+        calls: List[Dict[str, Any]] = []
+
+        def fake_post(root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            calls.append(payload)
+            if len(calls) == 1:
+                raise self._http_501()
+            return ok
+
+        mocker.patch.object(chat_llm, "_post", side_effect=fake_post)
+        result = chat_llm.invoke([HumanMessage(content="hi")])
+        assert result.content == "ok"
+        assert "cache_salt" in calls[0]  # first attempt was salt-bound
+        assert "cache_sharing" not in calls[1]  # retry dropped the salt fields
+        assert "cache_salt" not in calls[1]
+        assert chat_llm.affinity_stats["salt_degraded_requests"] == 1
+        # subsequent calls skip salt binding entirely
+        chat_llm.invoke([HumanMessage(content="again")])
+        assert "cache_salt" not in calls[2]
+        assert "cache_sharing" not in calls[2]
+        assert chat_llm.affinity_stats["salt_bound_requests"] == 1
+
+    def test_501_retry_failure_raises(self, chat_llm, mocker):
+        def fake_post(root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            raise self._http_501()
+
+        mocker.patch.object(chat_llm, "_post", side_effect=fake_post)
+        with pytest.raises(HTTPError):
+            chat_llm.invoke([HumanMessage(content="hi")])
+        assert chat_llm.affinity_stats["salt_degraded_requests"] == 1
+
+    def test_non_501_error_never_degrades(self, chat_llm, mocker):
+        def fake_post(root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            raise HTTPError(
+                "http://engine.test/v1/chat/completions", 503, "Unavailable", None, None
+            )
+
+        mocker.patch.object(chat_llm, "_post", side_effect=fake_post)
+        with pytest.raises(HTTPError):
+            chat_llm.invoke([HumanMessage(content="hi")])
+        assert chat_llm.affinity_stats["salt_degraded_requests"] == 0
+        assert chat_llm._salt_degraded is False  # pylint: disable=protected-access
+
+    def test_plain_request_501_propagates_untouched(self, mocker):
+        model = AscendAffinityChatModel(base_url="http://engine.test/v1")
+
+        def fake_post(root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            raise self._http_501()
+
+        mocker.patch.object(model, "_post", side_effect=fake_post)
+        with pytest.raises(HTTPError):
+            model.invoke([HumanMessage(content="hi")])
+        assert model.affinity_stats["salt_degraded_requests"] == 0
+
+    def test_streaming_501_retries_without_salt(self, chat_llm, mocker):
+        urlopen = mocker.patch(
+            "urllib.request.urlopen",
+            side_effect=[
+                self._http_501(),
+                _FakeSSE([_content_event("Hel"), _content_event("lo")]),
+            ],
+        )
+        chunks = list(chat_llm.stream([HumanMessage(content="hi")]))
+        assert "".join(c.text for c in chunks) == "Hello"
+        assert urlopen.call_count == 2
+        degraded_payload = json.loads(urlopen.call_args_list[1][0][0].data)
+        assert "cache_sharing" not in degraded_payload
+        assert "cache_salt" not in degraded_payload
+        assert chat_llm.affinity_stats["salt_degraded_requests"] == 1
+
+    def test_salt_enabled_false_keeps_pipeline_but_skips_salt(self, mocker):
+        model = AscendAffinityChatModel(
+            base_url="http://engine.test/v1", session_id="s", salt_enabled=False
+        )
+        post = _patch_post(model, mocker)
+        model.invoke([HumanMessage(content="hi")])
+        payload = post.call_args[0][2]
+        assert "cache_sharing" not in payload
+        assert "cache_salt" not in payload
+        assert model.affinity_stats["affinity_requests"] == 1
+        assert model.affinity_stats["salt_bound_requests"] == 0
 
 
 class TestUsagePassthrough:

@@ -72,7 +72,7 @@ task, per agent phase and per engine window — everything needed to spot
 
 ```
 [run] engine=http://.../v1 model=dsv4-0731 agents=['lc-baseline', ...] rounds=3
-[probe] {"reachable": true, "model_listed": true, "release_endpoint": false, "streaming": true, "stream_usage": false}
+[probe] {"reachable": true, "model_listed": true, "release_endpoint": false, "streaming": true, "stream_usage": false, "salt_tool_calls": false}
 === round 1/3 order=[...] ===
 [llm] r0 lc-affinity rebalance-C1001 ttft=1,112ms e2e=8,470ms prompt=1,203 comp=412 cached=0 salt=yes
 [task] r0 lc-affinity rebalance-C1001 ok hits=2/3 turns=4 e2e=37,472ms
@@ -86,8 +86,11 @@ task, per agent phase and per engine window — everything needed to spot
   show `None` when the engine (or gateway) does not return usage.
 - `[task]` — task outcome with keyword hits and total E2E.
 - `[phase]` — per agent per round: call volume, means, and the affinity
-  counters for that round (`salt=bound/total`, `releases=attempted/failed`).
+  counters for that round (`salt=bound/total`,
+  `releases=attempted/failed`, `degraded=salt-rejection fallbacks`).
   **`salt=44/44` (bound == total) proves every request was salt-bound.**
+  `degraded=N` means the engine rejected N salt-bound request(s) with
+  HTTP 501 and salt binding was then disabled for the instance.
 - `[engine]` — engine-side prefix hit rate / KV usage / NPU samples for the
   window (only when `--metrics-url` / `--npu-cmd` are configured).
 - `[warmup]` / `[build]` — warm-up outcome and agent build failures (e.g.
@@ -115,6 +118,8 @@ in COMPATIBILITY.md).
 | streaming | `POST /chat/completions` with `stream: true` (SSE `data:` frames) | no — but lc-pair TTFT degrades |
 | stream usage | `POST /chat/completions` with `stream_options.include_usage: true` (a final SSE event carrying top-level `"usage"`) | no — when ✗, token-derived metrics (Prefill/Decode/KV hit/TPOT) render ➖; check whether a gateway strips `stream_options` |
 | partial release | `POST {engine-root}/release_kv_cache` (404/405 = absent) | no — release requests are **auto-disabled** (salt binding still applies); the lab sheet notes it |
+| salt + tool calls | `POST /chat/completions` with `cache_sharing`/`cache_salt` **and** tool-call messages (MindIE-class engines answer HTTP 501) | no — when ✗, salt binding is **auto-disabled** for the affinity agent (`salt_enabled=False`), tool tasks run as a plain OpenAI client, and the lab sheet notes it |
+| engine identity | `GET /version`, `GET /health`, `GET /`, HTTP `Server` header | no — informational; the report header shows best-effort engine type/version with the evidence (HTML/SPA catch-all responses are treated as "endpoint absent") |
 
 Beyond the probes, for trustworthy numbers:
 
@@ -130,7 +135,10 @@ Beyond the probes, for trustworthy numbers:
   show it. The `cache_salt` must be bound *per call*: the runner passes
   `session_id` via run metadata, which the affinity model resolves inside
   `_generate`/`_agenerate` (streaming is routed through those methods so
-  the metadata is never dropped).
+  the metadata is never dropped). MindIE-class engines **reject**
+  salt + tool-call messages with HTTP 501; the `salt_tool_calls` probe
+  detects this up front and the client additionally auto-degrades at
+  runtime (retry without salt, then disable salt for the instance).
 - **no per-key rate limiting** — all four agents share one API key by
   design; RPM/TPM quotas on that key inject queuing noise into every
   latency figure. Lift the quota for the benchmark window.
@@ -141,6 +149,9 @@ Beyond the probes, for trustworthy numbers:
   harness works across vLLM / vLLM-Ascend / gateway-passthrough setups.
 - a framework that fails to build (e.g. openJiuwen not installed) is
   reported as a `build_error` row instead of silently producing zero data.
+  The `oj-*` agents need the proprietary `openjiuwen` package (internal
+  index, not on PyPI) — `pip install openjiuwen` on the run host, or they
+  are skipped and reported.
 
 ## What it measures
 

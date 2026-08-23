@@ -19,6 +19,35 @@
 
 ### Fixed
 
+- **引擎拒绝 salt+工具调用请求时 affinity 任务整轮 501（真机 benchmark 暴露）**：
+  MindIE 类引擎对同时携带 `cache_sharing`/`cache_salt` 且 messages 含工具
+  调用（assistant `tool_calls` / `tool` 角色）的 `/v1/chat/completions`
+  请求返回 **HTTP 501 Not Implemented**（2026-08-20 运行：6/8 任务 × 3 轮
+  全失败；无 salt 的 0818 运行零错误）。客户端新增安全降级：收到 501 后
+  去掉 salt 字段重试一次，随后禁用该实例的 salt 绑定
+  （`salt_degraded_requests` 计数 + WARNING 日志），工具智能体以普通
+  OpenAI 客户端照常工作；新增 `salt_enabled=False` 可在能力探测已判定
+  不支持时预先禁用。
+- **benchmark 新增 `salt_tool_calls` 能力探测**：开跑前用
+  `cache_salt` + 工具调用消息组合探测引擎，✗ 时自动禁用 affinity 的
+  salt 绑定（`salt_enabled=False`），工具任务照常执行并在报告化验单
+  与亲和行为证据区如实标注，不再产生整轮失败。
+- **benchmark 引擎身份探测（尽力而为）**：探测 `GET /version`、
+  `GET /health`、HTTP `Server` 头与根路径，尽力识别引擎类型与版本，
+  渲染在报告第 1 节开头（类型/版本/探测依据），失败一律降级为"未知"。
+- **探测抗 SPA catch-all 假阳性**：带单页应用前端的网关对任意未知路径
+  返回 200 + HTML（实测 models.ascend.huawei.com），会把不存在的
+  `/release_kv_cache`、`/version` 误判为存在；新增 HTML 响应识别，
+  一律视为"端点不存在"。
+- **baseline 无 token 用量**：`ChatOpenAI` 自定义 `base_url` 时默认不请求
+  流式 usage（`stream_usage` 默认关闭），导致 baseline 的
+  Prefill/Decode/TPOT/KV 命中率全部 ➖；`build_baseline_model` 现显式开启
+  `stream_usage=True`，两侧采集口径一致。
+- **TTFTRecorder 活动条目泄漏**：`on_llm_end` 未触发的失败调用（如引擎
+  501）残留 `_active` 条目；新增 `on_llm_error` 清理并记录告警日志。
+- **引擎侧指标静默缺失难排障**：`fetch_prometheus` 失败或无可解析数据时
+  静默返回 None；现对同一 URL 首次失败输出 WARNING（"metrics endpoint ...
+  will be N/A"），不再需要靠猜。
 - **流式路径丢失 run metadata 导致 cache_salt 失效（真机 benchmark 暴露）**：
   langchain-core 在 `streaming=True` 时绕过 `_generate`/`_agenerate` 直接调用
   `_stream` 且不传 run manager，使 `config.metadata` 中的 `session_id` 无法到达

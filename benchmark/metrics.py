@@ -19,12 +19,15 @@ with a flat core four raises the "suspected false affinity" alert.
 
 from __future__ import annotations
 
+import logging
 import re
 import statistics
 import subprocess  # nosec B404 - user-supplied sampler command, opt-in only
 import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 PASS = "PASS"
 WARN = "WARN"
@@ -301,6 +304,20 @@ def overall_verdict(verdicts: List[Verdict], npu_moved: bool) -> str:
 
 _PROM_LINE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+([0-9.eE+-]+)$")
 
+# Per-URL "already warned" set so a dead/missing /metrics endpoint logs one
+# WARNING per run instead of one per agent phase (24+ lines of noise).
+_warned_metrics_urls: set = set()
+
+
+def _warn_metrics_once(url: str, reason: str) -> None:
+    """Log one WARNING per URL; later failures stay silent (N/A anyway)."""
+    if url in _warned_metrics_urls:
+        return
+    _warned_metrics_urls.add(url)
+    logger.warning(
+        "metrics endpoint %s %s; engine-side metrics will be N/A", url, reason
+    )
+
 
 def fetch_prometheus(url: str) -> Optional[Dict[str, float]]:
     """GET a Prometheus text endpoint and parse ``name value`` lines."""
@@ -309,7 +326,8 @@ def fetch_prometheus(url: str) -> Optional[Dict[str, float]]:
     try:
         with urllib.request.urlopen(url, timeout=10) as response:  # nosec B310
             body = response.read().decode("utf-8", errors="replace")
-    except OSError:
+    except OSError as exc:
+        _warn_metrics_once(url, f"unreachable ({exc})")
         return None
     metrics: Dict[str, float] = {}
     for line in body.splitlines():
@@ -319,7 +337,10 @@ def fetch_prometheus(url: str) -> Optional[Dict[str, float]]:
                 metrics[match.group(1)] = float(match.group(2))
             except ValueError:
                 continue
-    return metrics or None
+    if not metrics:
+        _warn_metrics_once(url, "returned no parseable metrics")
+        return None
+    return metrics
 
 
 PROM_CACHE_HITS = "vllm:gpu_prefix_cache_hits_total"

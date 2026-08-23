@@ -34,8 +34,6 @@ import os
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -60,6 +58,7 @@ from benchmark.metrics import (
     sample_sidecar,
     usage_field,
 )
+from benchmark.probe import EngineConfig, probe_engine
 from benchmark.reporting import _REPORT_DIR_DEFAULT, write_reports
 
 ALL_AGENTS = ("lc-baseline", "lc-affinity", "oj-baseline", "oj-affinity")
@@ -111,16 +110,6 @@ def configure_logging(level: str, log_file: Optional[str] = None) -> None:
 def _fmt_ms(value: Optional[float]) -> str:
     """Render a millisecond value compactly for log lines."""
     return "n/a" if value is None else f"{value:,.0f}ms"
-
-
-@dataclass
-class EngineConfig:
-    """Resolved engine access parameters."""
-
-    base_url: str
-    engine_root: str
-    model: str
-    api_key: str
 
 
 @dataclass
@@ -235,6 +224,21 @@ class TTFTRecorder(BaseCallbackHandler):
             "yes" if entry.get("session") else "no",
         )
 
+    def on_llm_error(
+        self, error: BaseException, *, run_id: Optional[UUID] = None, **kwargs: Any
+    ) -> None:
+        """Failed calls never reach on_llm_end: drop the active entry so the
+        recorder does not leak per-call state (e.g. engine HTTP 501s)."""
+        entry = self._active.pop(run_id, None) if run_id is not None else None
+        if entry is not None:
+            logger.warning(
+                "[llm] r%s %s %s failed: %s",
+                self.round_idx,
+                entry["agent"],
+                entry["task"],
+                error,
+            )
+
 
 def _record_from_response(
     entry: Dict[str, Any], run_id: UUID, response: Any, round_idx: int
@@ -285,95 +289,6 @@ def records_to_metrics(records: List[LlmCallRecord]) -> List[CallMetrics]:
         for record in records
         if record.task_id != "warmup"
     ]
-
-
-# -- engine probing -------------------------------------------------------------
-
-
-def _http_json(
-    url: str, *, headers: Dict[str, str], payload: Optional[Dict[str, Any]] = None
-) -> Tuple[int, Any]:
-    """Perform a GET/POST and return (status, parsed-json-or-raw-bytes)."""
-    request = urllib.request.Request(url, headers=headers)
-    if payload is not None:
-        request.data = json.dumps(payload).encode("utf-8")
-        request.add_header("Content-Type", "application/json")
-        request.method = "POST"
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body = response.read().decode("utf-8", errors="replace")
-            status = response.status
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", errors="replace")
-    try:
-        return status, json.loads(body)
-    except json.JSONDecodeError:
-        return status, body
-
-
-def probe_engine(engine: EngineConfig) -> Dict[str, Any]:
-    """Probe reachability, model list, release endpoint and streaming."""
-    auth = {"Authorization": f"Bearer {engine.api_key}"}
-    probe: Dict[str, Any] = {"base_url": engine.base_url, "model": engine.model}
-    try:
-        status, data = _http_json(f"{engine.base_url.rstrip('/')}/models", headers=auth)
-        if status != 200:
-            raise OSError(f"models endpoint returned {status}")
-        entries = data.get("data") if isinstance(data, dict) else None
-        probe["reachable"] = True
-        probe["model_listed"] = engine.model in [
-            entry.get("id") for entry in (entries or [])
-        ]
-    except OSError as exc:
-        probe["reachable"] = False
-        probe["error"] = str(exc)
-        return probe
-    release_status, _ = _http_json(
-        f"{engine.engine_root.rstrip('/')}/release_kv_cache",
-        headers=auth,
-        payload={
-            "model": engine.model,
-            "cache_salt": "bench-probe",
-            "cache_sharing": True,
-            "messages": [{"role": "user", "content": "ping"}],
-            "messages_released_index": 0,
-        },
-    )
-    probe["release_endpoint"] = release_status not in (404, 405)
-    try:
-        stream_status, stream_body = _http_json(
-            f"{engine.base_url.rstrip('/')}/chat/completions",
-            headers=auth,
-            payload={
-                "model": engine.model,
-                "messages": [{"role": "user", "content": "回复：好"}],
-                "max_tokens": 8,
-                "stream": True,
-            },
-        )
-        probe["streaming"] = stream_status == 200 and "data:" in str(stream_body)
-    except OSError:
-        probe["streaming"] = False
-    try:
-        usage_status, usage_body = _http_json(
-            f"{engine.base_url.rstrip('/')}/chat/completions",
-            headers=auth,
-            payload={
-                "model": engine.model,
-                "messages": [{"role": "user", "content": "回复：好"}],
-                "max_tokens": 8,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            },
-        )
-        # vLLM-family engines emit a final SSE event carrying a top-level
-        # "usage" block only when stream_options.include_usage is honored.
-        probe["stream_usage"] = (
-            usage_status == 200 and '"usage"' in str(usage_body)
-        )
-    except OSError:
-        probe["stream_usage"] = False
-    return probe
 
 
 # -- task execution --------------------------------------------------------------
@@ -586,13 +501,22 @@ async def _build_oj_spec(
 
 
 async def build_agents(
-    names: List[str], engine: EngineConfig, round_idx: int, release_enabled: bool
+    names: List[str],
+    engine: EngineConfig,
+    round_idx: int,
+    release_enabled: bool,
+    salt_enabled: bool = True,
 ) -> List[AgentSpec]:
     """Build the requested agents fresh per round (counters reset).
 
     ``release_enabled`` comes from the engine probe: when the engine has no
     ``/release_kv_cache`` endpoint, the affinity model skips release requests
     (salt binding still applies) so no 404 noise inflates ``releases_failed``.
+
+    ``salt_enabled`` comes from the engine probe's ``salt_tool_calls``: when
+    the engine rejects salt-bound tool-call requests (HTTP 501), the affinity
+    model skips salt binding so tool-calling tasks keep running as a plain
+    OpenAI client.
     """
     specs: List[AgentSpec] = []
     for name in names:
@@ -611,6 +535,7 @@ async def build_agents(
                     base_url=engine.base_url,
                     api_key=engine.api_key,
                     release_enabled=release_enabled,
+                    salt_enabled=salt_enabled,
                 )
             )
             specs.append(
@@ -686,7 +611,9 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
     tasks: List[Any],
     agent_names: List[str],
     args: argparse.Namespace,
+    *,
     release_enabled: bool = True,
+    salt_enabled: bool = True,
 ) -> Dict[str, Any]:
     """All rounds (rotated order) + optional longrun phase."""
     per_agent_records: Dict[str, List[Any]] = {
@@ -702,7 +629,9 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
     for round_idx in range(args.rounds):
         order = rotate(agent_names, round_idx)
         print(f"=== round {round_idx + 1}/{args.rounds} order={order} ===", flush=True)
-        specs = await build_agents(order, engine, round_idx, release_enabled)
+        specs = await build_agents(
+            order, engine, round_idx, release_enabled, salt_enabled
+        )
         for spec in specs:
             round_results, window = await run_agent_phase(
                 spec, tasks, round_idx, args, args.metrics_url or ""
@@ -746,6 +675,7 @@ async def run_benchmark(  # pylint: disable=too-many-locals  # orchestrates all 
                 f"{stats.get('affinity_requests', 0)}"
                 f" releases={stats.get('releases_attempted', 0)}/"
                 f"{stats.get('releases_failed', 0)}"
+                f" degraded={stats.get('salt_degraded_requests', 0)}"
                 if stats
                 else "",
                 f" build_error={spec.build_error}" if spec.build_error else "",
@@ -947,6 +877,7 @@ def main() -> None:
             agent_names,
             args,
             release_enabled=bool(probe.get("release_endpoint")),
+            salt_enabled=bool(probe.get("salt_tool_calls")),
         )
     )
     md_path = write_reports(

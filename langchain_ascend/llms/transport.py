@@ -6,10 +6,14 @@ keep the main class lean.
 from __future__ import annotations
 
 import json
+import logging
+import urllib.error
 import urllib.request
 from typing import Any, Dict, Iterator, List
 
 from langchain_core.messages import ToolCallChunk
+
+logger = logging.getLogger(__name__)
 
 
 class TransportMixin:
@@ -19,6 +23,10 @@ class TransportMixin:
     ``timeout`` as pydantic fields. All methods are callable through ``self``
     after the class hierarchy is resolved.
     """
+
+    # -- helpers for the type checker (these live on the owning BaseChatModel) --
+    _salt_degraded: bool
+    _affinity_stats: Dict[str, int]
 
     def _build_request(
         self, root: str, path: str, payload: Dict[str, Any]
@@ -45,6 +53,48 @@ class TransportMixin:
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    # -- salt-rejection degradation --------------------------------------------
+
+    def _has_salt_fields(self, payload: Dict[str, Any]) -> bool:
+        """True when the chat payload carries the affinity salt fields."""
+        return "cache_sharing" in payload or "cache_salt" in payload
+
+    def _degrade_salt(
+        self, payload: Dict[str, Any], exc: urllib.error.HTTPError
+    ) -> Dict[str, Any]:
+        """Drop the salt fields, lock degradation, and log the rejection.
+
+        Called once when the engine actively rejects (HTTP 501, observed on
+        MindIE-class servers) a salt-bound chat request. Every other field is
+        kept, so the retried request goes through as a plain OpenAI call.
+        Degradation is sticky for this model instance: further requests skip
+        salt binding entirely (``_salt_degraded``), keeping the agent
+        functional on engines that cannot serve salt + tool-call messages.
+        """
+        degraded = dict(payload)
+        degraded.pop("cache_sharing", None)
+        degraded.pop("cache_salt", None)
+        self._salt_degraded = True
+        self._affinity_stats["salt_degraded_requests"] += 1
+        logger.warning(
+            "engine rejected salt-bound request (HTTP %s): retrying without "
+            "cache_sharing/cache_salt; salt binding disabled for this model "
+            "instance",
+            exc.code,
+        )
+        return degraded
+
+    def _post_salt_aware(
+        self, root: str, path: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """POST a chat-completions payload; on HTTP 501 retry once without salt."""
+        try:
+            return self._post(root, path, payload)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 501 and self._has_salt_fields(payload):
+                return self._post(root, path, self._degrade_salt(payload, exc))
+            raise
+
     def _chat_completions_url(self) -> str:
         """Chat-completions URL for origin, ``/v1`` base, or full endpoint.
 
@@ -67,12 +117,26 @@ class TransportMixin:
             return base[: -len("/v1")]
         return base
 
+    def _open_stream(self, payload: Dict[str, Any]) -> Any:
+        """Open the SSE response for one chat payload (salt-degrading on 501)."""
+        request = self._build_request(self._chat_completions_url(), "", payload)
+        try:
+            return urllib.request.urlopen(request, timeout=self.timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 501 and self._has_salt_fields(payload):
+                degraded = self._degrade_salt(payload, exc)
+                request = self._build_request(
+                    self._chat_completions_url(), "", degraded
+                )
+                return urllib.request.urlopen(request, timeout=self.timeout)
+            raise
+
     def _stream_events(
         self, payload: Dict[str, Any]
     ) -> Iterator[Dict[str, Any]]:
         """POST ``payload`` with SSE and yield each ``data:`` JSON event."""
-        request = self._build_request(self._chat_completions_url(), "", payload)
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        response = self._open_stream(payload)
+        with response:
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
                 if not line.startswith("data:"):
