@@ -1,6 +1,6 @@
 # Benchmark-only dependencies (not needed by the langchain_ascend library).
 deepagents>=0.2
-langchain-openai>=1.0
+langchain-openai>=1.6.0
 langchain>=1.0
 # The oj-* agents additionally require the proprietary openjiuwen package
 # (internal index, not published on PyPI):
