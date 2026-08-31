@@ -474,10 +474,13 @@ class TestAffinityStats:
 
 
 class TestSaltRejectionDegradation:
-    """MindIE-class engines reject salt-bound tool-call requests with HTTP 501
-    (observed on the 2026-08-20 real-engine run: 18 failed tool tasks while the
-    no-salt 0818 run had zero). The client must retry once without the salt
-    fields and then stop binding salt for the instance."""
+    """MindIE-class engines are reported to reject salt-bound tool-call
+    requests with HTTP 501. The client must retry once without the salt
+    fields and then stop binding salt **for the affected session** — other
+    sessions of the same model instance keep their binding. (Note: the
+    2026-08-20/24 benchmark 501s were later traced to the client-side
+    ``AIMessageChunk`` wire-role bug, not to salt rejection; see
+    ``test_serialization.py``.)"""
 
     @staticmethod
     def _http_501() -> HTTPError:
@@ -527,7 +530,7 @@ class TestSaltRejectionDegradation:
         with pytest.raises(HTTPError):
             chat_llm.invoke([HumanMessage(content="hi")])
         assert chat_llm.affinity_stats["salt_degraded_requests"] == 0
-        assert chat_llm._salt_degraded is False  # pylint: disable=protected-access
+        assert not chat_llm._salt_degraded_sessions  # pylint: disable=protected-access
 
     def test_plain_request_501_propagates_untouched(self, mocker):
         model = AscendAffinityChatModel(base_url="http://engine.test/v1")
@@ -632,3 +635,87 @@ class TestUsagePassthrough:
             "total_tokens": 12,
         }
         assert collector.tokens == ["Hel", "lo"]
+
+
+class TestPerSessionDegradation:
+    """A 501 on one session must not strip salt binding from other sessions
+    of the same model instance (degradation scoped to the rejected session)."""
+
+    @staticmethod
+    def _http_501() -> HTTPError:
+        return HTTPError(
+            "http://engine.test/v1/chat/completions", 501, "Not Implemented", None, None
+        )
+
+    def test_bad_session_degrades_good_session_keeps_salt(self, mocker):
+        model = AscendAffinityChatModel(base_url="http://engine.test/v1")
+        ok = {"choices": [{"message": {"content": "ok"}}]}
+        payloads: List[Dict[str, Any]] = []
+
+        def fake_post(root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            if path == "":  # chat-completions call (root already carries the URL)
+                payloads.append(payload)
+                if payload.get("cache_salt") == "bad-session" and len(payloads) == 1:
+                    raise self._http_501()
+            return ok
+
+        mocker.patch.object(model, "_post", side_effect=fake_post)
+        bad = model.bind(session_id="bad-session")
+        good = model.bind(session_id="good-session")
+        bad.invoke([HumanMessage(content="hi")])  # 501 -> retry -> degraded
+        good.invoke([HumanMessage(content="hi")])
+        assert payloads[-1]["cache_salt"] == "good-session"
+        assert payloads[-1]["cache_sharing"] is True
+        assert model.affinity_stats["salt_bound_requests"] == 2
+        assert model.affinity_stats["salt_degraded_requests"] == 1
+        assert model._salt_degraded_sessions == {"bad-session"}  # pylint: disable=protected-access
+
+    def test_degraded_session_stays_plain_afterwards(self, chat_llm, mocker):
+        ok = {"choices": [{"message": {"content": "ok"}}]}
+        calls: List[Dict[str, Any]] = []
+
+        def fake_post(root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            calls.append(payload)
+            if len(calls) == 1:
+                raise self._http_501()
+            return ok
+
+        mocker.patch.object(chat_llm, "_post", side_effect=fake_post)
+        chat_llm.invoke([HumanMessage(content="hi")])
+        chat_llm.invoke([HumanMessage(content="again")])
+        assert "cache_salt" not in calls[2]
+        assert "cache_sharing" not in calls[2]
+        assert chat_llm.affinity_stats["salt_bound_requests"] == 1
+        assert chat_llm.affinity_stats["salt_degraded_requests"] == 1
+
+    def test_501_error_body_is_logged(self, chat_llm, mocker, caplog):
+        import io
+
+        body = io.BytesIO(b'{"error": "unknown role: AIMessageChunk"}')
+        err = HTTPError(
+            "http://engine.test/v1/chat/completions",
+            501,
+            "Not Implemented",
+            None,
+            body,
+        )
+        mocker.patch("urllib.request.urlopen", side_effect=err)
+        with caplog.at_level("WARNING"):
+            with pytest.raises(HTTPError):
+                chat_llm.invoke([HumanMessage(content="hi")])
+        assert "unknown role: AIMessageChunk" in caplog.text
+
+
+class TestPayloadParity:
+    """Wire parity with ChatOpenAI keeps the benchmark single-variable."""
+
+    def test_top_p_omitted_at_neutral_value(self, chat_llm, mocker):
+        post = _patch_post(chat_llm, mocker)
+        chat_llm.invoke([HumanMessage(content="hi")])
+        assert "top_p" not in post.call_args[0][2]
+
+    def test_top_p_sent_when_configured(self, chat_llm, mocker):
+        chat_llm.top_p = 0.9
+        post = _patch_post(chat_llm, mocker)
+        chat_llm.invoke([HumanMessage(content="hi")])
+        assert post.call_args[0][2]["top_p"] == 0.9

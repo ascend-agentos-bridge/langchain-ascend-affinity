@@ -8,16 +8,31 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Sequence
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    ChatMessage,
+    FunctionMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+# Chunk classes (``AIMessageChunk`` etc.) subclass their base message, so the
+# isinstance checks below also normalize them — their ``type`` attribute is the
+# chunk class name, which must never leak into the wire ``role`` (engines
+# reject unknown roles; observed as HTTP 501 on vLLM-class servers, which
+# silently killed every tool-calling turn of streaming agents).
 _ROLE_BY_TYPE = {
     "human": "user",
     "ai": "assistant",
     "system": "system",
     "tool": "tool",
     "chat": "assistant",
+    "function": "function",
 }
+_WIRE_ROLES = frozenset(_ROLE_BY_TYPE.values())
 
 
 class SerializationMixin:
@@ -28,11 +43,45 @@ class SerializationMixin:
     diff.
     """
 
+    # isinstance table: chunk classes subclass their base message, so one
+    # entry per base class also normalizes every chunk variant.
+    _ROLE_BY_CLASS = (
+        (HumanMessage, "user"),
+        (AIMessage, "assistant"),
+        (ToolMessage, "tool"),
+        (SystemMessage, "system"),
+        (FunctionMessage, "function"),
+    )
+
+    @classmethod
+    def _wire_role(cls, message: BaseMessage) -> str:
+        """OpenAI wire role for a LangChain message (chunk-class safe).
+
+        Resolution order: the isinstance table first (this normalizes
+        ``AIMessageChunk`` → ``assistant`` and friends), then ``ChatMessage``'s
+        own role, then the type-name map for exotic types — and as a last
+        resort any unrecognized name is clamped to a legal wire role, so a
+        class name can never leak onto the wire (the 2026-08-24 501 root
+        cause).
+        """
+        for message_class, role in cls._ROLE_BY_CLASS:
+            if isinstance(message, message_class):
+                return role
+        if isinstance(message, ChatMessage):
+            custom = str(message.role or "")
+            if custom in _WIRE_ROLES:
+                return custom
+            return "assistant"
+        resolved = _ROLE_BY_TYPE.get(
+            message.type, str(getattr(message, "role", "") or message.type)
+        )
+        return resolved if resolved in _WIRE_ROLES else "assistant"
+
     @staticmethod
     def _serialize_message(message: BaseMessage) -> Dict[str, Any]:
         """Deterministic OpenAI-style serialization of a LangChain message."""
         entry: Dict[str, Any] = {
-            "role": _ROLE_BY_TYPE.get(message.type, message.type),
+            "role": SerializationMixin._wire_role(message),
             "content": message.content
             if isinstance(message.content, str)
             else str(message.content),
@@ -85,7 +134,7 @@ class SerializationMixin:
             "output_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
         }
-        if cached:
+        if cached is not None:
             metadata["input_token_details"] = {"cache_read": cached}
         return metadata
 

@@ -22,9 +22,10 @@ Engines that actively reject the affinity fields (observed: HTTP 501 on
 requests carrying ``cache_sharing``/``cache_salt`` together with tool-call
 messages, MindIE-class servers) are handled by safe degradation: the request
 is retried once without the salt fields, salt binding is then disabled for
-the model instance (``salt_degraded_requests`` counter + WARNING), and the
-agent keeps working as a plain OpenAI client. ``salt_enabled=False``
-pre-disables binding when a capability probe already ruled it out.
+the affected **session** (``salt_degraded_requests`` counter + WARNING), and
+the agent keeps working as a plain OpenAI client — other sessions of the same
+model instance are unaffected. ``salt_enabled=False`` pre-disables binding
+when a capability probe already ruled it out.
 
 Stage A (2026-08) additionally supports the openjiuwen agent-core
 ``agent_hint`` lifecycle protocol (``session_id`` / ``parent_session_id`` +
@@ -151,7 +152,8 @@ class AscendAffinityChatModel(
         "the engine rejects salt-bound tool-call requests (probe "
         "``salt_tool_calls``), so agents keep working as a plain OpenAI "
         "client. HTTP 501 rejections also auto-disable salt binding at "
-        "runtime (see ``salt_degraded_requests``).",
+        "runtime, scoped to the rejected session (see "
+        "``salt_degraded_requests``).",
     )
     release_endpoint: str = Field(
         default="/release_kv_cache",
@@ -184,7 +186,7 @@ class AscendAffinityChatModel(
         default_factory=PrefixCacheTracker
     )
     _affinity_stats: Dict[str, int] = PrivateAttr(default_factory=_new_affinity_stats)
-    _salt_degraded: bool = PrivateAttr(default=False)
+    _salt_degraded_sessions: set = PrivateAttr(default_factory=set)
     _idle_timer: Optional[threading.Timer] = PrivateAttr(default=None)
     _idle_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 

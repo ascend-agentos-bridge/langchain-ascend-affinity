@@ -33,7 +33,7 @@ class AffinityPipelineMixin:
 
     # -- helpers for the type checker (these live on the owning BaseChatModel) --
     _affinity_stats: Dict[str, int]
-    _salt_degraded: bool
+    _salt_degraded_sessions: set
     _prefix_tracker: Any
     model: str
     temperature: float
@@ -50,7 +50,12 @@ class AffinityPipelineMixin:
         stop: Optional[Sequence[str]],
         tools: Optional[Sequence[Dict[str, Any]]],
     ) -> Dict[str, Any]:
-        """Assemble the core chat-completions payload without affinity fields."""
+        """Assemble the core chat-completions payload without affinity fields.
+
+        ``top_p`` is omitted at its neutral value 1.0, matching ChatOpenAI's
+        payload (which sends no ``top_p`` unless configured) so the paired
+        benchmark stays single-variable on the wire.
+        """
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -58,8 +63,9 @@ class AffinityPipelineMixin:
                 for message in messages
             ],
             "temperature": self.temperature,
-            "top_p": self.top_p,
         }
+        if self.top_p is not None and self.top_p != 1.0:
+            payload["top_p"] = self.top_p
         if stop:
             payload["stop"] = list(stop)
         if self.max_tokens is not None:
@@ -93,10 +99,14 @@ class AffinityPipelineMixin:
             # keep the pipeline counters but never inject the salt fields.
             logger.debug("affinity skipped: salt binding disabled")
             return
-        if self._salt_degraded:
-            # A previous 501 rejection locked the degradation for this
-            # instance; requests keep flowing as a plain OpenAI client.
-            logger.debug("affinity skipped: salt binding disabled after engine rejection")
+        if str(session_id) in self._salt_degraded_sessions:
+            # A previous 501 rejection locked the degradation for THIS
+            # session; its requests keep flowing as a plain OpenAI client
+            # while other sessions of this instance stay salt-bound.
+            logger.debug(
+                "affinity skipped: salt binding degraded for session %s",
+                session_id,
+            )
             return
         self._affinity_stats["salt_bound_requests"] += 1
         payload["cache_sharing"] = True

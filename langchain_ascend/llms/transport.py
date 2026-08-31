@@ -25,7 +25,7 @@ class TransportMixin:
     """
 
     # -- helpers for the type checker (these live on the owning BaseChatModel) --
-    _salt_degraded: bool
+    _salt_degraded_sessions: set
     _affinity_stats: Dict[str, int]
 
     def _build_request(
@@ -47,11 +47,35 @@ class TransportMixin:
             method="POST",
         )
 
+    @staticmethod
+    def _log_http_error(exc: urllib.error.HTTPError, url: str) -> None:
+        """Log an engine HTTP error with its response body (diagnosability).
+
+        The status code alone hides the actual rejection reason (unknown
+        message role, malformed salt fields, template errors, ...). The body
+        is read defensively — it may already be consumed or the connection
+        gone — and is never re-raised from here.
+        """
+        try:
+            body = exc.read(2048).decode("utf-8", errors="replace").strip()
+        except OSError:
+            body = ""
+        logger.warning(
+            "engine HTTP %s on %s%s",
+            exc.code,
+            url,
+            f": {body[:512]}" if body else " (response body unavailable)",
+        )
+
     def _post(self, root: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """POST ``payload`` as JSON to ``root + path`` and return the body."""
         request = self._build_request(root, path, payload)
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            self._log_http_error(exc, request.full_url)
+            raise
 
     # -- salt-rejection degradation --------------------------------------------
 
@@ -62,25 +86,30 @@ class TransportMixin:
     def _degrade_salt(
         self, payload: Dict[str, Any], exc: urllib.error.HTTPError
     ) -> Dict[str, Any]:
-        """Drop the salt fields, lock degradation, and log the rejection.
+        """Drop the salt fields, lock degradation for the session, and log.
 
         Called once when the engine actively rejects (HTTP 501, observed on
         MindIE-class servers) a salt-bound chat request. Every other field is
         kept, so the retried request goes through as a plain OpenAI call.
-        Degradation is sticky for this model instance: further requests skip
-        salt binding entirely (``_salt_degraded``), keeping the agent
-        functional on engines that cannot serve salt + tool-call messages.
+        Degradation is sticky **per session** (``_salt_degraded_sessions``):
+        further requests of the rejected session skip salt binding entirely
+        (``salt_degraded_requests`` counter), while other sessions on the
+        same model instance keep their own binding — one broken session must
+        not silently strip affinity from every other conversation.
         """
         degraded = dict(payload)
         degraded.pop("cache_sharing", None)
         degraded.pop("cache_salt", None)
-        self._salt_degraded = True
+        session_id = payload.get("cache_salt")
+        if session_id:
+            self._salt_degraded_sessions.add(str(session_id))
         self._affinity_stats["salt_degraded_requests"] += 1
         logger.warning(
             "engine rejected salt-bound request (HTTP %s): retrying without "
-            "cache_sharing/cache_salt; salt binding disabled for this model "
-            "instance",
+            "cache_sharing/cache_salt; salt binding disabled for session %s "
+            "(other sessions keep their binding)",
             exc.code,
+            session_id or "<unknown>",
         )
         return degraded
 
@@ -123,6 +152,7 @@ class TransportMixin:
         try:
             return urllib.request.urlopen(request, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
+            self._log_http_error(exc, request.full_url)
             if exc.code == 501 and self._has_salt_fields(payload):
                 degraded = self._degrade_salt(payload, exc)
                 request = self._build_request(
