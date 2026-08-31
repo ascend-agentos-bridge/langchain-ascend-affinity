@@ -126,9 +126,10 @@ agent_hint 生命周期协议（身份字段 + evict / offload / prefetch）—�
 可对接任何 OpenAI 兼容引擎；亲和收益取决于引擎是否消费亲和字段
 （`cache_salt`、`/release_kv_cache`）。降级始终安全：引擎忽略未知字段时
 请求退化为普通 OpenAI 调用，释放失败仅产生非致命告警。引擎**主动拒绝**
-亲和字段时（实测：`cache_salt` + 工具调用消息组合返回 HTTP 501，
-MindIE 类服务器）同样自动处理——请求去掉 salt 字段重试一次，随后该
-实例的 salt 绑定被禁用（`salt_degraded_requests` 计数 + WARNING 日志），
+亲和字段时（据 agent-core 联调经验：`cache_salt` + 工具调用消息
+组合返回 HTTP 501，MindIE 类服务器，本仓库未独立复核）同样自动处理——
+请求去掉 salt 字段重试一次，随后**该 session** 的 salt 绑定被禁用
+（`salt_degraded_requests` 计数 + WARNING 日志，其他 session 不受影响），
 工具调用型智能体以普通 OpenAI 客户端继续工作。
 
 哪个引擎版本支持什么（MindIE、vLLM-Ascend）、完整接口契约、与
@@ -146,7 +147,7 @@ openjiuwen agent-core 的协议兼容、以及 LLM 网关透传行为，**集中
 |---|---|
 | `affinity_requests` | 进入亲和管线的请求数 |
 | `salt_bound_requests` | 实际与会话完成 salt 绑定的请求数 |
-| `salt_degraded_requests` | 引擎拒绝 salt 绑定请求（HTTP 501）后去掉 salt 字段重试的请求数；此后该实例禁用 salt 绑定 |
+| `salt_degraded_requests` | 引擎拒绝 salt 绑定请求（HTTP 501）后去掉 salt 字段重试的请求数；此后该 session 禁用 salt 绑定（其他 session 不受影响） |
 | `releases_attempted` | 已发送的部分 KV 释放请求数 |
 | `releases_failed` | 释放失败数（从不致命） |
 | `management_requests` | 已发送的 agent_hint `evict` / `offload` / `prefetch` 请求数 |

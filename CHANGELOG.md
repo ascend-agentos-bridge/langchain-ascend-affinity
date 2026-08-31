@@ -19,14 +19,46 @@
 
 ### Fixed
 
-- **引擎拒绝 salt+工具调用请求时 affinity 任务整轮 501（真机 benchmark 暴露）**：
+- **亲和智能体全部工具任务 HTTP 501 失败（2026-08-20/24 真机报告的根因，勘误）**：
+  流式路径聚合出的历史消息是 `AIMessageChunk`，其 `type` 为类名
+  `"AIMessageChunk"`，旧序列化器把类名原样写入 wire `role`，引擎对未知
+  role 返回 **HTTP 501 Not Implemented**——工具任务第一轮调用成功、携带
+  工具结果的第二轮起整轮失败，且与 salt 无关（去掉 salt 重试同样 501）。
+  修复：role 改为按消息类层级（isinstance）判定，chunk 类归一为基类
+  role，未知类型钳制为合法 wire role（新增 `test_serialization.py` 回归
+  测试）。**勘误**：此前（2026-08-20/24）把这批 501 归因为"引擎拒绝
+  salt + 工具调用"是误诊；相关引擎经探测实际**接受**该组合，MindIE 类
+  服务器的拒绝行为仅为 agent-core 联调经验（未独立复核），详见
+  [COMPATIBILITY.zh-CN.md](COMPATIBILITY.zh-CN.md) 勘误记录。
+- **salt 拒绝降级粒度从"实例级"收窄为"按 session"**：此前一次 501 会禁用
+  整个模型实例的 salt 绑定（benchmark 中一轮 8 个任务共享一个实例，一个
+  坏任务连累全部任务，0824 报告 `salt=4/60` 即此效应）；现降级只作用于
+  被拒 session（`_salt_degraded_sessions`），其他 session 保持绑定。
+- **传输层记录引擎 HTTP 错误响应体**：`_post` / `_open_stream` 捕获
+  `HTTPError` 时输出状态码 + 响应体（截断至 512 字节）后再抛出，引擎
+  拒绝原因不再只能靠状态码盲猜。
+- **单变量对齐：`top_p` 中性值省略**：亲和载荷此前恒定携带
+  `top_p: 1.0`，而配对的 `ChatOpenAI` 默认省略该字段；现在 `top_p=1.0`
+  时同样省略，配对双方线格式仅差亲和字段本身。
+- **化验单对照有效性守卫（防幸存者偏差）**：配对双方任务完成集不一致或
+  LLM 调用数差异过大（< 70%）时，两侧样本不再是同一工作负载，全部指标
+  判定强制 ➖ 并给出"⛔ 对照无效"警报（2026-08-24 报告的 E2E -39.5% ✅
+  即亲和侧工具任务早夭后的幸存者偏差假象，此类结论不再出现）。
+- **KV 命中率"无数据"不再渲染为 0.0%**：引擎/网关未返回
+  `prompt_tokens_details.cached_tokens` 时（实测多见），旧聚合把 None
+  当 0 求和、化验单显示硬 0.0% 并判 ⚠️；现区分"无数据"（➖）与"真 0"
+  （0.0%），且 `cached_tokens=0` 的真实零值不再被 `if cached:` 吞掉。
+- **探测抗 JSON catch-all 假阳性**：部分服务器对未知路径返回
+  200 + `{"error": "..."}` JSON 错误体（实测 LM Studio：不存在的
+  `/release_kv_cache` 返回 200），曾把端点误判为存在并产生 3 次假成功的
+  release 计数；现"200 + JSON error 响应体"同样视为"端点不存在"。
+- **引擎拒绝 salt+工具调用请求时的安全降级（防御保留，归因勘误见首条）**：
   MindIE 类引擎对同时携带 `cache_sharing`/`cache_salt` 且 messages 含工具
-  调用（assistant `tool_calls` / `tool` 角色）的 `/v1/chat/completions`
-  请求返回 **HTTP 501 Not Implemented**（2026-08-20 运行：6/8 任务 × 3 轮
-  全失败；无 salt 的 0818 运行零错误）。客户端新增安全降级：收到 501 后
-  去掉 salt 字段重试一次，随后禁用该实例的 salt 绑定
+  调用的 `/v1/chat/completions` 请求返回 **HTTP 501 Not Implemented**
+  （agent-core 联调经验，本仓库未独立复核）。客户端收到 501 后
+  去掉 salt 字段重试一次，随后按 session 禁用 salt 绑定
   （`salt_degraded_requests` 计数 + WARNING 日志），工具智能体以普通
-  OpenAI 客户端照常工作；新增 `salt_enabled=False` 可在能力探测已判定
+  OpenAI 客户端照常工作；`salt_enabled=False` 可在能力探测已判定
   不支持时预先禁用。
 - **benchmark 新增 `salt_tool_calls` 能力探测**：开跑前用
   `cache_salt` + 工具调用消息组合探测引擎，✗ 时自动禁用 affinity 的

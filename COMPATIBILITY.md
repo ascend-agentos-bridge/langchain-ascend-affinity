@@ -10,7 +10,18 @@
 > are invalidated on mismatch (section 3), and whether affinity fields
 > survive common LLM gateways (section 4).
 >
-> **Last verified**: 2026-08-17. Maintenance rules in section 5.
+> **Last verified**: 2026-08-31. Maintenance rules in section 5.
+>
+> **Correction (2026-08-31)**: the tool-task HTTP 501s in this repo's
+> 2026-08-20/24 real-engine runs were caused by a **client-side defect** —
+> the serialized wire role of streaming-aggregated history messages leaked
+> the class name `AIMessageChunk` (engines reject unknown roles), not by
+> engines rejecting salt; fixed 2026-08-31. Both engines involved
+> (vLLM-family, `dsv4-0731`) **accept** salt + tool-call combinations per
+> the probe (`salt_tool_calls` probe → 200). The statements below about
+> MindIE-class servers rejecting salt + tool-call requests come from
+> agent-core joint-debugging experience and are **not independently
+> verified by this repo**; the degradation path is kept as a defense.
 
 ---
 
@@ -68,17 +79,24 @@ bucket and risk cross-session KV pollution.
 Degradation is always safe: standards-compliant gateways ignore unknown
 fields, release failures stay non-fatal warnings, and the model keeps
 working as a plain OpenAI client. Engines that actively **reject** the
-affinity fields are handled the same way (observed on a real-engine run
-2026-08-20): MindIE-class servers return **HTTP 501 Not Implemented** for
-`/v1/chat/completions` requests carrying `cache_sharing` / `cache_salt`
-together with tool-call messages (assistant `tool_calls` / `tool` role) —
-plain-message salt requests and tool-call requests without salt both work.
-The client auto-degrades: the rejected request is retried once without the
-salt fields, salt binding is disabled for the model instance
-(`salt_degraded_requests` counter + warning), and generation continues as
-a plain OpenAI client. `salt_enabled=False` pre-disables binding when a
-capability probe (`salt_tool_calls`) already ruled it out; the benchmark
-probes this combination up front and reports it on the lab sheet.
+affinity fields are handled the same way (reported from agent-core
+joint-debugging, not independently verified by this repo): MindIE-class
+servers return **HTTP 501 Not Implemented** for `/v1/chat/completions`
+requests carrying `cache_sharing` / `cache_salt` together with tool-call
+messages (assistant `tool_calls` / `tool` role) — plain-message salt
+requests and tool-call requests without salt both work. The client
+auto-degrades: the rejected request is retried once without the salt
+fields, salt binding is disabled **for the affected session**
+(`salt_degraded_requests` counter + warning, other sessions unaffected),
+and generation continues as a plain OpenAI client. `salt_enabled=False`
+pre-disables binding when a capability probe (`salt_tool_calls`) already
+ruled it out; the benchmark probes this combination up front and reports
+it on the lab sheet.
+
+> Verified in this repo (2026-08-24/31): the vLLM-family engine
+> (`dsv4-0731`, v0.25.1) and LM Studio both accept salt + tool-call
+> combinations (probe → 200); the 501 degradation path is covered by a
+> mock engine and unit tests.
 
 ## 2. Version matching list
 
@@ -110,7 +128,7 @@ probes this combination up front and reports it on the lab sheet.
 |---|---|---|
 | **Full release protocol (4/4)**: openjiuwen release protocol × vLLM-Ascend v0.15 + PR #6722 patch | chat + salt + metrics + release | the only combination yielding partial-release gains; requires carrying the patch yourself, no official release |
 | **Salt tier (3/4)**: openjiuwen any version × vLLM-Ascend ≥ v0.9.1 (stock) | chat + salt + metrics | **the recommended real-engine validation platform today**: salt isolation and cross-turn hits work; release 404 is expected |
-| **Global-cache tier (1/4)**: openjiuwen any version × MindIE any version (stock) | chat only | affinity fields safely ignored on plain messages, but **actively rejected (HTTP 501) on salt + tool-call requests** (observed 2026-08-20) — the client auto-degrades; only the engine-global content-hash prefix cache remains (stacking constraints in 3.2) |
+| **Global-cache tier (1/4)**: openjiuwen any version × MindIE any version (stock) | chat only | affinity fields safely ignored on plain messages, but **reported as actively rejected (HTTP 501) on salt + tool-call requests** (agent-core joint-debugging experience, not independently verified by this repo) — the client auto-degrades; only the engine-global content-hash prefix cache remains (stacking constraints in 3.2) |
 | **Lifecycle tier**: openjiuwen develop (agent_hint) × Huawei-internal vLLM | full agent_hint | not reproducible in the public ecosystem; waiting for engine adoption or a PR #6722-style extension |
 
 ## 3. Benefit-invalidation analysis on mismatch
@@ -119,7 +137,7 @@ probes this combination up front and reports it on the lab sheet.
 
 | # | Affinity mechanism | Required engine support | vLLM-Ascend ≥ 0.9.1 (stock) | + PR #6722 | MindIE ≤ 3.1.0 (stock) | Consequence when missing |
 |---|---|---|---|---|---|---|
-| 1 | Session salt binding (`cache_salt`) | engine consumes salt into the first block hash | ✅ works | ✅ | ❌ ignored; **salt + tool-call messages actively rejected with HTTP 501** (observed 2026-08-20) → client auto-degrades to a plain client | MindIE: no session isolation namespace; cross-session KV shares one global cache — isolation gain = 0; tool-calling agents additionally trigger 501s without the client's salt-rejection degradation |
+| 1 | Session salt binding (`cache_salt`) | engine consumes salt into the first block hash | ✅ works | ✅ | ❌ ignored; **salt + tool-call messages reported as actively rejected with HTTP 501** (agent-core joint-debugging experience, not independently verified) → client auto-degrades to a plain client | MindIE: no session isolation namespace; cross-session KV shares one global cache — isolation gain = 0; tool-calling agents additionally trigger 501s without the client's salt-rejection degradation |
 | 2 | `cache_sharing` flag | engine consumes (non-standard field) | ⚠️ ignored (harmless) | ✅ | ⚠️ ignored (harmless) | no standalone gain; only meaningful alongside salt |
 | 3 | Prefix-diff detection | none (pure client-side) | ✅ always works | ✅ | ✅ always works | never invalid; but with no release endpoint the diff result has nowhere to go |
 | 4 | Partial release (`/release_kv_cache`) | engine endpoint | ❌ 404 | ✅ | ❌ 404 | **rewritten-history gains fully lost**: stale KV blocks linger in memory until LRU eviction; growing `releases_failed` is expected, not a fault |
@@ -134,7 +152,7 @@ probes this combination up front and reports it on the lab sheet.
 |---|---|---|---|
 | vLLM-Ascend ≥ 0.9.1 (stock) | same-salt cross-turn hits during tool-call gaps, prefill ↓, TTFT ↓ (**real and measurable**); cross-session isolation | partial release, all agent_hint lifecycle management; under memory pressure salt buckets are still LRU-evictable (salt is an isolation namespace, not a residency guarantee) | the affinity pair should show KV hit-rate/prefill differences; growing `releases_failed` is expected |
 | vLLM-Ascend + PR #6722 | all of the above + precise release on rewritten history (stale blocks dropped, slots freed for active sessions) | agent_hint lifecycle management (not implemented by the plugin) | release counters should turn successful |
-| MindIE (stock) | only engine-global prefix-cache hits on common prefixes (system prompt, tool definitions), no session isolation | salt isolation, partial release, lifecycle management — all lost. **Stacking constraint**: MindIE prefix cache does not stack with function call (multiturn) or context parallel + sequence parallel — tool-calling agents may lose even the common-prefix gain, benefit ≈ 0. **Active rejection**: `cache_salt` + tool-call messages return HTTP 501 (observed 2026-08-20) — the client auto-degrades (retry without salt, then disable salt for the instance) and the benchmark pre-disables salt via the `salt_tool_calls` probe | zero salt binding and failed releases are expected; with the Prefix Cache plugin enabled, cross-check `--metrics-url` for residual gains; `salt_degraded_requests` > 0 on the affinity agent marks the auto-degradation |
+| MindIE (stock) | only engine-global prefix-cache hits on common prefixes (system prompt, tool definitions), no session isolation | salt isolation, partial release, lifecycle management — all lost. **Stacking constraint**: MindIE prefix cache does not stack with function call (multiturn) or context parallel + sequence parallel — tool-calling agents may lose even the common-prefix gain, benefit ≈ 0. **Active rejection (reported, not independently verified)**: `cache_salt` + tool-call messages return HTTP 501 — the client auto-degrades (retry without salt, then disable salt for the affected session) and the benchmark pre-disables salt via the `salt_tool_calls` probe | zero salt binding and failed releases are expected; with the Prefix Cache plugin enabled, cross-check `--metrics-url` for residual gains; `salt_degraded_requests` > 0 on the affinity agent marks the auto-degradation |
 | Huawei-internal vLLM | full agent_hint (identity + evict/offload/prefetch + inference-then-manage) | — (not verifiable publicly) | n/a |
 
 ### 3.3 Conclusion
@@ -182,6 +200,14 @@ bodies as "endpoint absent" (`release_endpoint=false`), and the engine
 identity block falls back to "unknown". Affinity-field acceptance is still
 verifiable through the real chat route (`salt_tool_calls` /
 `stream_usage` probes).
+
+**Probe caveat — JSON catch-all servers** (observed on LM Studio,
+2026-08-31): some servers answer unknown paths with **200 +
+`{"error": "..."}` JSON bodies** instead of 404, which would equally
+misreport endpoints as existing. The probe now also treats "200 with a
+JSON error body" as "endpoint absent" (before this fix, LM Studio's
+non-existent `/release_kv_cache` was misreported as present, producing 3
+false-success release counts in one run).
 
 ## 5. Maintenance rules
 

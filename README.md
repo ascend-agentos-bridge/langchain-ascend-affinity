@@ -130,12 +130,13 @@ Works with any OpenAI-compatible engine; the affinity gain depends on the
 engine consuming the affinity fields (`cache_salt`, `/release_kv_cache`).
 Degradation is always safe: engines that ignore unknown fields treat
 requests as plain OpenAI calls, and release failures stay non-fatal
-warnings. Engines that actively *reject* the affinity fields (observed:
-HTTP 501 on `cache_salt` + tool-call messages, MindIE-class servers) are
-handled automatically — the request is retried once without the salt
-fields and salt binding is then disabled for the instance
-(`salt_degraded_requests` counter + warning), so tool-calling agents keep
-working as a plain OpenAI client.
+warnings. Engines that actively *reject* the affinity fields (reported
+from agent-core joint debugging: HTTP 501 on `cache_salt` + tool-call
+messages, MindIE-class servers; not independently verified by this repo)
+are handled automatically — the request is retried once without the salt
+fields and salt binding is then disabled for the affected session
+(`salt_degraded_requests` counter + warning, other sessions unaffected),
+so tool-calling agents keep working as a plain OpenAI client.
 
 Which engine versions support what (MindIE, vLLM-Ascend), the full
 interface contract, protocol compatibility with openjiuwen agent-core, and
@@ -153,7 +154,7 @@ the same numbers the benchmark reports:
 |---|---|
 | `affinity_requests` | requests that entered the affinity pipeline |
 | `salt_bound_requests` | requests actually salt-bound to a session |
-| `salt_degraded_requests` | requests retried without salt after the engine rejected a salt-bound request (HTTP 501); salt binding is then disabled for the instance |
+| `salt_degraded_requests` | requests retried without salt after the engine rejected a salt-bound request (HTTP 501); salt binding is then disabled for that session (other sessions unaffected) |
 | `releases_attempted` | partial KV-release requests sent |
 | `releases_failed` | release requests that failed (never fatal) |
 | `management_requests` | agent_hint `evict` / `offload` / `prefetch` requests sent |

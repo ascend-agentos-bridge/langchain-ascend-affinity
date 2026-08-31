@@ -83,8 +83,8 @@ python benchmark/run_benchmark.py
 - `[phase]` —— 每 agent 每轮：调用量、均值与该轮亲和计数
   （`salt=绑定数/总数`、`releases=尝试/失败`、`degraded=salt 拒绝降级数`）。
   **`salt=44/44`（绑定数=总数）即证明每次请求都绑定了 salt。**
-  `degraded=N` 表示引擎对 N 个 salt 绑定请求返回 HTTP 501，随后该实例
-  的 salt 绑定被禁用。
+  `degraded=N` 表示引擎对 N 个 salt 绑定请求返回 HTTP 501，随后对应
+  session 的 salt 绑定被禁用（其他 session 不受影响）。
 - `[engine]` —— 引擎侧前缀命中率 / KV 占用 / NPU 采样（仅配置了
   `--metrics-url` / `--npu-cmd` 时出现）。
 - `[warmup]` / `[build]` —— 预热结果与 agent 构建失败（如 openJiuwen
@@ -108,8 +108,8 @@ streaming / stream_usage`）。各探测项对引擎的要求：
 | 模型列表 | `GET {base_url}/models`，返回 `data[].id` | 不阻断——打印 `model_listed=False` 后继续运行 |
 | 流式 | `POST /chat/completions` 带 `stream: true`（SSE `data:` 帧） | 不阻断，但 lc 配对的 TTFT 失效 |
 | 流式 usage | `POST /chat/completions` 带 `stream_options.include_usage: true`（末帧出现顶层 `"usage"`） | 不阻断；✗ 时 token 类指标（Prefill/Decode/KV 命中/TPOT）全部 ➖，请检查网关是否透传 `stream_options` |
-| 部分释放 | `POST {engine-root}/release_kv_cache`（404/405 视为无此端点） | 不阻断；**自动禁用 release 请求**（cache_salt 绑定保留），报告会注明 |
-| salt+工具调用 | `POST /chat/completions` 同时携带 `cache_sharing`/`cache_salt` 与工具调用消息（MindIE 类引擎返回 HTTP 501） | 不阻断；✗ 时 **自动禁用 salt 绑定**（`salt_enabled=False`），工具任务以普通 OpenAI 客户端照常执行，报告会注明 |
+| 部分释放 | `POST {engine-root}/release_kv_cache`（404/405、HTML catch-all、或 200 + JSON error 响应体均视为无此端点） | 不阻断；**自动禁用 release 请求**（cache_salt 绑定保留），报告会注明 |
+| salt+工具调用 | `POST /chat/completions` 同时携带 `cache_sharing`/`cache_salt` 与工具调用消息（据报：MindIE 类引擎返回 HTTP 501，本仓库未独立复核） | 不阻断；✗ 时 **自动禁用 salt 绑定**（`salt_enabled=False`），工具任务以普通 OpenAI 客户端照常执行，报告会注明 |
 | 引擎身份 | `GET /version`、`GET /health`、`GET /`、HTTP `Server` 头 | 不阻断；报告开头展示尽力而为的引擎类型/版本与探测依据（HTML/SPA catch-all 响应一律视为"端点不存在"） |
 
 探测之外，要求数据可信还需：
@@ -124,9 +124,10 @@ streaming / stream_usage`）。各探测项对引擎的要求：
   客户端，化验单会如实呈现。`cache_salt` 必须**每次调用绑定**：runner
   通过 run metadata 传 `session_id`，亲和模型在 `_generate`/`_agenerate`
   内解析（流式路径也经这两个方法，保证 metadata 不丢失）。MindIE 类
-  引擎会**拒绝** salt + 工具调用消息（HTTP 501）：`salt_tool_calls`
-  探测会预先发现，客户端也会在运行时自动降级（去 salt 重试后本实例
-  禁用 salt）。
+  引擎**据报**会拒绝 salt + 工具调用消息（HTTP 501，agent-core 联调经验，
+  本仓库未独立复核）：`salt_tool_calls` 探测会预先发现，客户端也会在
+  运行时自动降级（去 salt 重试后对应 session 禁用 salt，其他 session
+  不受影响）。
 - **不要按 key 限流** —— 四个 agent 设计上共用一个 API key；若网关对
   该 key 配置 RPM/TPM 配额，排队噪声会污染所有时延指标。请在测试
   窗口内放开配额。
