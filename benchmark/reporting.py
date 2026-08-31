@@ -8,12 +8,20 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from benchmark.metrics import PASS_MARK, judge, overall_verdict, verdict_text
+from benchmark.metrics import (
+    NA,
+    PASS_MARK,
+    PairValidity,
+    judge,
+    overall_verdict,
+    pair_validity,
+    verdict_text,
+)
 
 _REPORT_DIR_DEFAULT = Path(__file__).resolve().parent / "reports"
 
@@ -62,14 +70,61 @@ def _identity_summary(probe: Dict[str, Any]) -> str:
     return f"类型={engine_type}，版本={version}（探测依据：{basis}）"
 
 
+def _task_success_sets(
+    results: List[Any], *agent_names: str
+) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
+    """Task ids completed without ANY round error, per agent (pair guard).
+
+    A task counts only when every round of that agent finished it without
+    error — a flaky task on one side already means the two sides ran
+    different workloads. An agent with no records at all (build failure)
+    yields ``None``, which skips the set check in :func:`pair_validity`.
+    """
+    sets: List[Optional[Set[str]]] = []
+    for name in agent_names:
+        records = [record for record in results if record.agent == name]
+        if not records:
+            sets.append(None)
+            continue
+        failed = {record.task_id for record in records if record.error}
+        sets.append({record.task_id for record in records} - failed)
+    return sets[0], sets[1]
+
+
+def _pair_validity(
+    baseline: Dict[str, Any],
+    affinity: Dict[str, Any],
+    baseline_ok: Optional[Set[str]],
+    affinity_ok: Optional[Set[str]],
+) -> PairValidity:
+    """Comparability check for one (affinity, baseline) lab-sheet pair."""
+    return pair_validity(
+        baseline_calls=(baseline.get("median") or {}).get("llm_calls"),
+        affinity_calls=(affinity.get("median") or {}).get("llm_calls"),
+        baseline_ok=baseline_ok,
+        affinity_ok=affinity_ok,
+    )
+
+
 def _render_lab_sheet(
-    pair_name: str, affinity: Dict[str, Any], baseline: Dict[str, Any]
+    pair_name: str,
+    affinity: Dict[str, Any],
+    baseline: Dict[str, Any],
+    validity: Optional[PairValidity] = None,
 ) -> List[str]:
-    """One lab-sheet table: affinity agent vs its same-framework baseline."""
+    """One lab-sheet table: affinity agent vs its same-framework baseline.
+
+    An invalid pair (one side skipped/failed a different workload) keeps its
+    raw numbers visible but has every verdict forced to ➖ plus an explicit
+    alert, so survivorship artifacts can never surface as ✅/❌ conclusions.
+    """
     aff, base = affinity["median"], baseline["median"]
     verdicts = [
         judge(metric, aff.get(metric), base.get(metric)) for metric in VERDICT_METRICS
     ]
+    invalid = validity is not None and not validity.comparable
+    if invalid:
+        verdicts = [replace(verdict, status=NA) for verdict in verdicts]
     npu_moved = any(
         any(sample for sample in window.get("npu_samples", []))
         for window in affinity.get("engine_windows", [])
@@ -85,7 +140,14 @@ def _render_lab_sheet(
             f"| {verdict.label} | {verdict.reference} | "
             f"{verdict_text(verdict)} | {PASS_MARK[verdict.status]} |"
         )
-    rows += ["", f"**结论：{overall_verdict(verdicts, npu_moved)}**", ""]
+    if invalid:
+        conclusion = (
+            f"⛔ 对照无效：{validity.reason}；上表判定一律按 ➖ 处理，"
+            "不作为亲和收益或损失的证据。"
+        )
+    else:
+        conclusion = overall_verdict(verdicts, npu_moved)
+    rows += ["", f"**结论：{conclusion}**", ""]
     return rows
 
 
@@ -167,6 +229,12 @@ def _render_affinity_evidence(
                 "  - salt 绑定为 0：引擎探测 `salt_tool_calls=✗`，salt 绑定被"
                 "自动禁用（引擎拒绝 cache_salt + 工具调用请求，HTTP 501），"
                 "affinity 以普通客户端运行，属安全降级。"
+            )
+        degraded = stats.get("salt_degraded_requests", 0)
+        if degraded:
+            rows.append(
+                f"  - ⚠️ 运行中发生 {degraded} 次 salt 拒绝降级（按 session 生效，"
+                "被拒会话退化为普通客户端；详见 run.log 中引擎 HTTP 错误响应体）。"
             )
         hit_rates = [
             window.get("hit_rate_delta")
@@ -260,6 +328,11 @@ def render_report_md(
                 f"{affinity_name} vs {baseline_name}",
                 summaries[affinity_name],
                 summaries[baseline_name],
+                validity=_pair_validity(
+                    summaries[baseline_name],
+                    summaries[affinity_name],
+                    *_task_success_sets(results, baseline_name, affinity_name),
+                ),
             )
     sections += [
         "## 4. 分轮明细（每 Agent 每轮）",
@@ -279,8 +352,14 @@ def render_report_md(
         "  亲和只影响 prefill/缓存，decode 阶段速度理论上不变。",
         "- **假亲和警报**：若仅 NPU 利用率/带宽等资源指标变化，而核心四项持平，",
         "  报告自动给出 ❌ 疑似假亲和 —— 说明只是换了设备而非调度生效。",
+        "- **对照无效警报（⛔）**：配对双方任务完成集不一致或 LLM 调用数差异",
+        "  过大时，两侧样本不再是同一工作负载，全部指标强制 ➖ 并给出原因，",
+        "  防止幸存者偏差（如一侧任务早夭导致的假 E2E 收益）冒充结论。",
         "- openJiuwen 侧 TTFT/TPOT 为 ➖：agent-core 回调无 token 级事件，",
         "  其判定依赖 E2E/Prefill/KV 命中三项。",
+        "- KV 命中率为 ➖ 表示引擎/网关未返回 cached_tokens（非命中为 0）：",
+        "  此时核心四项仅三项可判，需网关透传 prompt_tokens_details 或",
+        "  配置 --metrics-url 走引擎侧指标。",
         "- 单轮样本噪声大，主判定用跨轮中位数；建议 rounds≥3。",
         "",
         "## 8. 附录",

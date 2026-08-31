@@ -900,6 +900,44 @@ class TestProbeHttp:
         probe = probe_engine(engine)
         assert probe["salt_tool_calls"] is False
 
+    def test_release_endpoint_error_json_means_absent(self, mocker):
+        """Servers with a JSON catch-all (observed on LM Studio) answer
+        unknown paths with 200 + {"error": ...}; that must NOT count as a
+        release endpoint, otherwise releases are attempted and silently
+        'succeed' against a route that does not exist."""
+        engine = self._engine()
+        responses = [
+            (200, {"data": [{"id": "m"}]}),
+            (200, {"error": "Unexpected endpoint or method. (POST /release_kv_cache)"}),
+            (200, 'data: {"choices":[{"delta":{"content":"好"}}]}\n\ndata: [DONE]'),
+            (
+                200,
+                'data: {"choices":[],"usage":{"prompt_tokens":9}}\n\ndata: [DONE]',
+            ),
+            (200, 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]'),
+        ]
+        mocker.patch("benchmark.probe._http_json", side_effect=responses)
+        mocker.patch("benchmark.probe._http_probe", return_value=(-1, None, ""))
+        probe = probe_engine(engine)
+        assert probe["release_endpoint"] is False
+
+    def test_salt_tool_calls_error_json_false(self, mocker):
+        engine = self._engine()
+        responses = [
+            (200, {"data": [{"id": "m"}]}),
+            (404, "not found"),
+            (200, 'data: {"choices":[{"delta":{"content":"好"}}]}\n\ndata: [DONE]'),
+            (
+                200,
+                'data: {"choices":[],"usage":{"prompt_tokens":9}}\n\ndata: [DONE]',
+            ),
+            (200, {"error": "Unexpected endpoint or method. (POST /chat/completions)"}),
+        ]
+        mocker.patch("benchmark.probe._http_json", side_effect=responses)
+        mocker.patch("benchmark.probe._http_probe", return_value=(-1, None, ""))
+        probe = probe_engine(engine)
+        assert probe["salt_tool_calls"] is False
+
     def test_identity_html_endpoints_not_recognized(self, mocker):
         """SPA catch-all 200+HTML on /version and /health must not be read
         as working endpoints (models.ascend.huawei.com behaves this way)."""
@@ -1215,3 +1253,153 @@ class TestRunLogging:
             recorder.on_llm_end(response, run_id=run_id)
         messages = [r.message for r in caplog.records if "[llm]" in r.message]
         assert messages and "salt=no" in messages[0]
+
+
+class TestPairValidity:
+    """Survivorship-bias guard: a pair that ran different workloads must be
+    marked invalid instead of yielding artifact ✅/❌ verdicts (the 2026-08-24
+    run showed E2E -39.5% ✅ purely because the affinity agent died on its
+    tool tasks and only 13 of 46 calls survived)."""
+
+    def test_task_set_mismatch_invalidates(self):
+        from benchmark.metrics import pair_validity
+
+        verdict = pair_validity(
+            baseline_calls=46,
+            affinity_calls=13,
+            baseline_ok={"t1", "t2"},
+            affinity_ok={"t1"},
+        )
+        assert verdict.comparable is False
+        assert "任务完成集不一致" in verdict.reason
+
+    def test_call_count_skew_invalidates(self):
+        from benchmark.metrics import pair_validity
+
+        verdict = pair_validity(
+            baseline_calls=46,
+            affinity_calls=13,
+            baseline_ok={"t1"},
+            affinity_ok={"t1"},
+        )
+        assert verdict.comparable is False
+        assert "调用数差异过大" in verdict.reason
+
+    def test_equal_workload_is_comparable(self):
+        from benchmark.metrics import pair_validity
+
+        verdict = pair_validity(
+            baseline_calls=46,
+            affinity_calls=40,
+            baseline_ok={"t1", "t2"},
+            affinity_ok={"t1", "t2"},
+        )
+        assert verdict.comparable is True
+        assert verdict.reason == ""
+
+    def test_unknown_task_sets_skip_set_check(self):
+        from benchmark.metrics import pair_validity
+
+        verdict = pair_validity(
+            baseline_calls=10, affinity_calls=10, baseline_ok=None, affinity_ok=None
+        )
+        assert verdict.comparable is True
+
+    def test_both_sides_empty_invalidates(self):
+        from benchmark.metrics import pair_validity
+
+        verdict = pair_validity(
+            baseline_calls=0, affinity_calls=0, baseline_ok=set(), affinity_ok=set()
+        )
+        assert verdict.comparable is False
+
+    def test_task_success_sets_exclude_any_round_error(self):
+        from benchmark.reporting import _task_success_sets
+
+        results = [
+            SimpleNamespace(agent="lc-baseline", task_id="t1", error=None),
+            SimpleNamespace(agent="lc-baseline", task_id="t2", error=None),
+            SimpleNamespace(agent="lc-affinity", task_id="t1", error=None),
+            SimpleNamespace(agent="lc-affinity", task_id="t2", error="boom"),
+            SimpleNamespace(agent="oj-affinity", task_id="t1", error=None),
+        ]
+        base_ok, aff_ok = _task_success_sets(results, "lc-baseline", "lc-affinity")
+        assert base_ok == {"t1", "t2"}
+        assert aff_ok == {"t1"}
+
+    def test_task_success_sets_none_without_records(self):
+        from benchmark.reporting import _task_success_sets
+
+        base_ok, aff_ok = _task_success_sets([], "lc-baseline", "lc-affinity")
+        assert base_ok is None
+        assert aff_ok is None
+
+
+class TestLabSheetValidityGuard:
+    @staticmethod
+    def _summary(llm_calls: int, ttft: Optional[float], e2e: Optional[float]) -> dict:
+        return {
+            "median": {
+                "llm_calls": llm_calls,
+                "ttft_mean_ms": ttft,
+                "prefill_per_call": None,
+                "kv_hit_rate": None,
+                "e2e_mean_ms": e2e,
+                "decode_per_call": None,
+                "tpot_mean_ms": None,
+                "decode_tps": None,
+            },
+            "per_round": [],
+            "affinity_stats": {},
+            "build_error": None,
+            "engine_windows": [],
+        }
+
+    def test_invalid_pair_forces_na_and_alert(self):
+        from benchmark.reporting import _pair_validity, _render_lab_sheet
+
+        baseline = self._summary(46, 1000.0, 6000.0)
+        affinity = self._summary(13, 500.0, 3000.0)  # would be a fake ✅
+        validity = _pair_validity(baseline, affinity, {"t1", "t2"}, {"t1"})
+        rows = _render_lab_sheet(
+            "lc-affinity vs lc-baseline", affinity, baseline, validity=validity
+        )
+        joined = "\n".join(rows)
+        assert "⛔ 对照无效" in joined
+        assert "任务完成集不一致" in joined
+        assert "| ✅ |" not in joined  # no PASS verdict survives the guard
+        assert joined.count("| ➖ |") == 7
+
+    def test_valid_pair_keeps_verdicts(self):
+        from benchmark.reporting import _pair_validity, _render_lab_sheet
+
+        baseline = self._summary(46, 1000.0, 6000.0)
+        affinity = self._summary(46, 500.0, 3000.0)
+        validity = _pair_validity(baseline, affinity, {"t1"}, {"t1"})
+        rows = _render_lab_sheet(
+            "lc-affinity vs lc-baseline", affinity, baseline, validity=validity
+        )
+        joined = "\n".join(rows)
+        assert "⛔" not in joined
+        assert "✅" in joined  # real improvement on a comparable workload
+
+
+class TestAggregateCacheSemantics:
+    def test_kv_hit_rate_none_without_cached_data(self):
+        metrics = aggregate([_call(100.0, 1100.0, prompt=1000, completion=50)])
+        assert metrics.kv_hit_rate is None
+
+    def test_zero_cached_tokens_is_real_zero(self):
+        metrics = aggregate(
+            [_call(100.0, 1100.0, prompt=1000, completion=50, cached=0)]
+        )
+        assert metrics.kv_hit_rate == 0.0
+
+    def test_mixed_cached_records_compute_hit_rate(self):
+        metrics = aggregate(
+            [
+                _call(100.0, 1100.0, prompt=1000, completion=50, cached=0),
+                _call(100.0, 1100.0, prompt=1000, completion=50, cached=500),
+            ]
+        )
+        assert metrics.kv_hit_rate == 25.0

@@ -97,7 +97,14 @@ def _percentile(values: List[float], ratio: float) -> Optional[float]:
 
 
 def aggregate(calls: List[CallMetrics]) -> AgentMetrics:
-    """Aggregate per-call records into one agent-level metric set."""
+    """Aggregate per-call records into one agent-level metric set.
+
+    The KV hit rate is only computed when the engine actually reported
+    ``cached_tokens`` for at least one call: engines/gateways that omit
+    ``prompt_tokens_details`` yield ``None`` records, and coercing those to
+    zero would render a misleading hard ``0.0%`` instead of ➖ (data
+    unavailable).
+    """
     ttfts = [c.ttft_ms for c in calls if c.ttft_ms is not None]
     e2es = [c.e2e_ms for c in calls if c.e2e_ms is not None]
     tpots = [
@@ -114,6 +121,7 @@ def aggregate(calls: List[CallMetrics]) -> AgentMetrics:
     ]
     decode_tokens = sum(c.completion_tokens or 0 for c in calls)
     prompt_tokens = sum(c.prompt_tokens or 0 for c in calls)
+    has_cache_data = any(c.cached_tokens is not None for c in calls)
     cached_tokens = sum(c.cached_tokens or 0 for c in calls)
     decode_time_total = sum(decode_seconds)
     return AgentMetrics(
@@ -132,7 +140,7 @@ def aggregate(calls: List[CallMetrics]) -> AgentMetrics:
         prefill_per_call=round(prompt_tokens / len(calls), 1) if calls else None,
         decode_per_call=round(decode_tokens / len(calls), 1) if calls else None,
         kv_hit_rate=round(cached_tokens / prompt_tokens * 100.0, 1)
-        if prompt_tokens
+        if prompt_tokens and has_cache_data
         else None,
     )
 
@@ -297,6 +305,59 @@ def overall_verdict(verdicts: List[Verdict], npu_moved: bool) -> str:
     if any(v.status == PASS for v in core):
         return "⚠️ 部分改善：仅部分核心指标达标，见逐项判定"
     return "❌ 未体现亲和收益（核心指标持平或恶化）"
+
+
+# -- pair validity guard ----------------------------------------------------------
+#
+# A lab-sheet verdict compares affinity vs baseline aggregates. When the two
+# sides did NOT execute the same workload (tasks failed on one side only, or
+# the LLM call counts diverge wildly), the deltas are survivorship artifacts —
+# e.g. an affinity agent that dies on every tool task "wins" E2E because only
+# its short QA calls survive. Such pairs must be marked invalid instead of
+# yielding misleading ✅/❌ rows.
+
+MIN_CALL_RATIO = 0.7  # min/max accepted LLM-call count ratio within a pair
+
+
+@dataclass
+class PairValidity:
+    """Whether an (affinity, baseline) pair is statistically comparable."""
+
+    comparable: bool
+    reason: str = ""
+
+
+def pair_validity(
+    *,
+    baseline_calls: Optional[int],
+    affinity_calls: Optional[int],
+    baseline_ok: Optional[set],
+    affinity_ok: Optional[set],
+) -> PairValidity:
+    """Judge pair comparability from task success sets and call counts.
+
+    ``*_ok`` are the sets of task ids completed without error on each side
+    (``None`` = unknown, skip that check). The call-count check bounds the
+    workload-shape skew: below :data:`MIN_CALL_RATIO` the two aggregates no
+    longer average the same kind of calls.
+    """
+    if baseline_ok is not None and affinity_ok is not None:
+        if baseline_ok != affinity_ok:
+            return PairValidity(
+                False,
+                f"两侧任务完成集不一致（baseline {len(baseline_ok)} 个 vs "
+                f"affinity {len(affinity_ok)} 个），样本不可比",
+            )
+        if not baseline_ok:
+            return PairValidity(False, "两侧均无成功完成的任务，无有效样本")
+    calls = [c for c in (baseline_calls, affinity_calls) if c]
+    if len(calls) == 2 and min(calls) / max(calls) < MIN_CALL_RATIO:
+        return PairValidity(
+            False,
+            f"两侧 LLM 调用数差异过大（baseline {baseline_calls} vs "
+            f"affinity {affinity_calls}），样本不可比",
+        )
+    return PairValidity(True)
 
 
 # -- engine & NPU side (optional sources) ----------------------------------------

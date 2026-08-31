@@ -107,6 +107,27 @@ def _is_html(body: str) -> bool:
     return head.startswith("<!doctype html") or "<html" in head
 
 
+def _is_error_json(body: Any) -> bool:
+    """True when a 200 body is actually a JSON error object.
+
+    Servers with a JSON catch-all answer unknown paths with HTTP 200 +
+    ``{"error": ...}`` (observed on LM Studio: ``POST /release_kv_cache`` →
+    ``200 {"error": "Unexpected endpoint or method."}``), so a bare status
+    check would report endpoints that do not exist. Treat error bodies as
+    "endpoint absent".
+    """
+    if isinstance(body, dict):
+        return bool(body.get("error"))
+    text = str(body).strip()
+    if not text.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("error"))
+
+
 def _http_probe(url: str, headers: Dict[str, str]) -> Tuple[int, Optional[str], str]:
     """Cheap GET: (status, Server header, up-to-2KB body) — never raises."""
     request = urllib.request.Request(url, headers=headers)
@@ -226,7 +247,9 @@ def probe_engine(engine: EngineConfig) -> Dict[str, Any]:
         },
     )
     probe["release_endpoint"] = (
-        release_status not in (404, 405) and not _is_html(str(release_body))
+        release_status not in (404, 405)
+        and not _is_html(str(release_body))
+        and not _is_error_json(release_body)
     )
     try:
         stream_status, stream_body = _http_json(
@@ -271,7 +294,9 @@ def probe_engine(engine: EngineConfig) -> Dict[str, Any]:
             payload=_salt_tool_probe_payload(engine.model),
         )
         probe["salt_tool_calls"] = (
-            salt_status == 200 and not _is_html(str(salt_body))
+            salt_status == 200
+            and not _is_html(str(salt_body))
+            and not _is_error_json(salt_body)
         )
     except OSError:
         probe["salt_tool_calls"] = False
