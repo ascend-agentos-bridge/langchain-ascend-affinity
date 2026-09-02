@@ -38,6 +38,18 @@ export ASCEND_API_KEY=<API密钥>
 python benchmark/run_benchmark.py
 ```
 
+### 在封闭 / 无外网集群上运行
+
+如果目标引擎机**没有互联网**（这是昇腾物理机集群的典型部署），**不要**
+直接用 `--setup`（它会走 pip 联网安装依赖）。正确做法是：在一台能
+联网的构建机上用 `scripts/build_benchmark.py` 打出自包含的包，
+传到运行机后用包内附带的 `install_offline.sh` / `install_offline.ps1`
+完成离线安装。
+
+完整操作指引（含跨平台 wheel 处理、pydantic-core / numpy / orjson /
+tiktoken / tokenizers 等 C 扩展包的兜底方案）见：
+[`../OFFLINE_PACKAGING.zh-CN.md`](../OFFLINE_PACKAGING.zh-CN.md)。
+
 参数：
 
 - `--rounds N`（默认 3）：每轮完整任务集；agent 顺序每轮轮转；每 agent

@@ -40,6 +40,19 @@ export ASCEND_API_KEY=<api-key>
 python benchmark/run_benchmark.py
 ```
 
+### Running on a closed / air-gapped cluster
+
+If the engine host has no internet access (typical for on-prem Ascend
+clusters), **do not** run `--setup` (it invokes `pip install` against an
+index). Instead, build a self-contained package on a connected build
+machine using `scripts/build_benchmark.py` and ship the zip to the run
+host, then use the embedded `install_offline.sh` / `install_offline.ps1`.
+
+Complete step-by-step guide, including cross-platform wheel handling and
+troubleshooting for C-extension-only packages (pydantic-core, numpy,
+orjson, tiktoken, tokenizers…):
+[`../OFFLINE_PACKAGING.md`](../OFFLINE_PACKAGING.md).
+
 Options:
 
 - `--rounds N` (default 3): full task-set rounds per agent, agent order

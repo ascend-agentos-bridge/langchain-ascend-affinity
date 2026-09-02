@@ -219,6 +219,25 @@ python benchmark/run_benchmark.py --setup \
 
 配置与报告解读见 [benchmark/README.zh-CN.md](benchmark/README.zh-CN.md)。
 
+### 离线 / 无外网环境打包
+
+如果基准测试要跑在**封闭无互联网**的昇腾集群上，推荐的方式是在一台
+可联网的构建机上打出完整的自包含上传包。`scripts/build_benchmark.py`
+可以把源码树、版本钉死的 requirements、安装脚本以及（可选）目标平台
+的全部 wheel 一起打成 zip。
+
+完整说明（跨平台 wheel 下载、Linux/Windows 安装脚本、包内容速查、
+故障排查）见 [OFFLINE_PACKAGING.zh-CN.md](OFFLINE_PACKAGING.zh-CN.md)。
+在能联网的构建机上一条命令完成打包：
+
+```bash
+python scripts/build_benchmark.py --with-wheels --with-installers --zip
+```
+
+生成的 zip 经 scp / U 盘 搬到封闭机后，运行包内的
+`install_offline.sh`（Linux）或 `install_offline.ps1`（Windows）
+即可完成部署。
+
 ## 开发
 
 ```bash

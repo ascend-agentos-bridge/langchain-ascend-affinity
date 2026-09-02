@@ -230,6 +230,27 @@ python benchmark/run_benchmark.py --setup \
 See [benchmark/README.md](benchmark/README.md) for configuration and how to
 read the report.
 
+### Offline / air-gapped packaging
+
+When the benchmark target is a closed Ascend cluster with no internet access,
+building a self-contained upload package on a connected build machine is the
+recommended workflow. The helper script `scripts/build_benchmark.py` bundles
+the source tree, pinned requirements, installer scripts, and optionally all
+platform wheels into a single zip.
+
+Full walkthrough (cross-platform wheel downloads, Linux/Windows installers,
+package contents reference, troubleshooting) lives in
+[OFFLINE_PACKAGING.md](OFFLINE_PACKAGING.md). One-line quick start on the
+build machine that has internet:
+
+```bash
+python scripts/build_benchmark.py --with-wheels --with-installers --zip
+```
+
+The generated zip is then scp'd / sneakernetted onto the closed host and
+installed via the embedded `install_offline.sh` (Linux) or
+`install_offline.ps1` (Windows).
+
 ## Development
 
 ```bash
